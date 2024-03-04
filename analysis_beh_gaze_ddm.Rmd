@@ -1,0 +1,2355 @@
+---
+title: 'Supplement 2: Analysis for Lasagna et al. 2024'
+subtitle: '"Cognitive Mechanisms of Self-Referential Social Perception in Psychosis and Bipolar Disorder: Insights from Computational Modeling"'
+author: "Carly A. Lasagna, Ivy F. Tso, Scott D. Blain, Timothy J. Pleskac"
+output:
+  html_document:
+    toc: yes
+    number_sections: yes
+    fig_width: 4
+    fig_height: 4
+    df_print: paged
+    toc_depth: 2
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+    number_sections: yes
+    latex_engine: lualatex
+geometry: margin=2cm
+classoption: 9pt
+header-includes:
+  - \usepackage{amsmath}
+---
+ 
+Note. * = Primary analysis presented in main text; ^ = Supplemental analysis.
+
+<br>
+
+# Code availability 
+ 
+__Code used to perform analyses is available on OSF and GitHub:__
+
+* OSF [(https://osf.io/x5n93/?view_only=c5e6d4bf6fbe48bebe9e28d6938b9246)](https://osf.io/x5n93/?view_only=c5e6d4bf6fbe48bebe9e28d6938b9246)
+* GitHub [(https://github.com/CarlyLasagna/gazeddm_sz_bd)](https://github.com/CarlyLasagna/gazeddm_sz_bd).
+
+__Coding key for groups, task conditions, and task responses:__
+
+*Diagnostic groups:* 1=HC, 2=BD, 3=SZ
+
+*DDM parameters:* alpha=threshold separation, beta=start point, ndt=non-decision time, delta=drift rate, delta bias=drift bias
+
+*Task stimuli:* 
+
+* gaze direction: 1=direct, 2=indirect 
+* head orientation: 1=forward, 2=deviated 
+* emotion: 1=neutral, 2=fearful 
+* emotion*head: 1=neutral-forward, 2=fearful-forward, 3=neutral-deviated, 4=fearful-deviated
+
+*Task responses:* 
+
+* response: 1=yes (looking at me), 2=no (not looking at me)
+* accuracy: 0=incorrect, 1=correct
+
+<br>
+
+```{r id1, message=FALSE, warning=FALSE, include=FALSE}
+
+# Setup: load packages and custom functions
+
+rm(list=ls()) #clear environment
+cat("\f") #clear console
+set.seed(42) #clear previous seed
+
+options(width = 10000)
+options(max.print=10000)
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(rstan)
+library(ggplot2)
+library(ggpubr)
+library(tidyr)
+library(plyr)
+library(dplyr)
+library(formatR)
+library(loo)
+library(bayesplot)
+library(misty)
+library(shredder)
+library(RWiener)
+library(hrbrthemes)
+library(viridis)
+library(ggridges)
+library(HDInterval)
+library(boot)
+library(pkgcond)
+library(cmdstanr)
+library(posterior)
+library(data.table)
+library(parallel)
+library(doParallel)
+library(foreach)
+library(psych)
+library(arsenal)
+library(GGally)
+library(chlorpromazineR)
+library(pscl)
+library(lmtest)
+library(kableExtra)
+library(apaTables)
+
+#from HBayesDM toolbox. Ahn et al 2017
+HDIofMCMC <- function(sampleVec,credMass = 0.9) {#from hbayesdm toolbox (Ahn et al 2014)
+  sortedPts = sort(sampleVec)
+  ciIdxInc = floor(credMass * length(sortedPts))
+  nCIs = length(sortedPts) - ciIdxInc
+  ciWidth = rep(0 , nCIs)
+  for (i in 1:nCIs) {
+    ciWidth[i] = sortedPts[i + ciIdxInc] - sortedPts[i]
+  }
+  HDImin = sortedPts[which.min(ciWidth)]
+  HDImax = sortedPts[which.min(ciWidth) + ciIdxInc]
+  HDIlim = c(HDImin , HDImax)
+  return(HDIlim)
+}
+
+#custom function to print hierarchical linear regression outputs in a not-so-chaotic way
+apaRegress <- function(models){#models is list of lm() models 
+  n_models<-length(models)
+  
+  for (i in 1:n_models){
+    tempmod<-models[[i]]
+    tempsum<-data.frame(summary(tempmod)[["coefficients"]])
+    
+    if (i==1){
+      refmod<-models[[1]]#begin with model 1 as reference model
+      refmod_n<-1
+      R2_change<-"--"
+      F_change<-"--"
+      p_change<-"--"
+    }else{
+      R2_change<-round(summary(tempmod)$r.squared - summary(refmod)$r.squared,2) #calc R2 change
+      F_change<-round(anova(refmod,tempmod)$F[2],2)
+      p_change<-round(anova(refmod,tempmod)$`Pr(>F)`[2],3)
+    }
+    
+    temp_fitdata<-data.frame(Model=i,
+                         Predictor="",
+                         Versus=refmod_n,
+                         R2=round(summary(tempmod)[["r.squared"]],3),
+                         R2_change=R2_change,
+                         F_change=F_change,
+                         p_change=p_change,
+                         b="",
+                         SE="",
+                         CI="",
+                         t="",
+                         p="")
+    temp_preddata<-data.frame(Model="",
+                         Predictor=rownames(tempsum),
+                         Versus="",
+                         R2="",
+                         R2_change="",
+                         F_change="",
+                         p_change="",
+                         b=round(tempsum$Estimate,2),
+                         SE=round(tempsum$Std..Error,2),
+                         CI=paste("[",round(confint(tempmod),2)[,1],", ",round(confint(tempmod),2)[,2],"]",sep=""),
+                         t=round(tempsum$t.value,2),
+                         p=round(tempsum$Pr...t..,3))
+    tempdata<-rbind(temp_fitdata,temp_preddata)
+    colnames(tempdata)<-c("Model","Predictor","Reference Model","R2",paste("R2","\u0394",sep=""),paste("F","\u0394",sep=""),paste("p","\u0394",sep=""),
+                          "b","SE","CI","t","p")
+    if (i==1){
+      output<-tempdata
+    }else{
+      output<-rbind(output,tempdata)
+    }
+    if (is.na(p_change)==FALSE){
+      if (p_change<.05){
+        refmod<-models[[i]]
+        refmod_n<-i
+      }
+    }
+  }
+  return(output)
+}
+
+```
+ 
+### Load winning model (Model 10) {.hidden .unlisted}
+
+```{r id2, include=FALSE}
+
+#Note: Final winning model (Model 10) run on HPC in cmdstanr with 36 chains over 36 cores, with 2500 warmup, 6000 postwarmup draws = 216000 postwarmup samples
+
+## Prep Data: loop through cmdstanr .csv files and combine into single data frame (postwarmup draws x # pars) where #postwarmup draws = rows of all draws from chain 1 (6000 rows), then all draws from chian 2 and so-on)
+
+warmup<-2500
+postwarmup_draws<-6000
+n_chains<-36
+models<-c('m10')
+outpath<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/"
+
+final_fit_file<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/final_fit/stanfit_cmdstan.RData"
+if(file.exists(final_fit_file)){
+  load(final_fit_file)
+  alldata<-data.frame(alldata)
+}else{
+  for (i in 1:length(models)){
+    model<-paste("hddm_",models[i],sep="")
+    the_fitfile<-paste(outpath,model,'/final_fit/stanfit_cmdstan.RData',sep="")
+    if(file.exists(the_fitfile)){ #if extracted stanfit file exists, do nothing
+    }else{
+      fitdir<-paste(outpath,model,'/final_fit/',sep="")
+      setwd(fitdir)
+  
+      #read in all .csv files
+      files <- (Sys.glob("*.csv"))
+      skip_rows<-50 
+      
+      for (j in 1:length(files)){
+        print(j)
+        tmpfile<-paste(fitdir,files[j],sep="")
+        
+        #only grab the actual samples (not extra comments cmdstan outputs after)
+        tmpdata<-fread(tmpfile,skip=skip_rows,nrows=postwarmup_draws)
+        
+        if (j==1){
+            alldata<-tmpdata
+        }else{
+          alldata<-rbind(alldata,tmpdata)
+        }
+      }
+      
+      myheaders<-read.csv(tmpfile,skip=45,nrows=1)
+      my_colnames <- colnames(myheaders) 
+      colnames(alldata)<-my_colnames
+      
+      #save combined cmdstan fit object to .RData file
+      fitname<-paste(fitdir,"stanfit_cmdstan",".RData",sep = "") 
+      save(alldata, file = fitname)
+      alldata<-data.frame(alldata)
+    }
+  }
+}
+
+# check for divergent transitions
+divmsg<-paste('There were ',sum(alldata$divergent__),' divergent transitions after warmup',sep='')
+print(divmsg)
+
+# narrow down parameters to examine
+
+#grab sigma data 
+tmp_col<-grep("sig_", colnames(alldata),fixed = TRUE) 
+sigdata<-alldata[,tmp_col] 
+
+#grab mu (group) data and remove untransformed parameters
+tmp_col<-grep("mu_", colnames(alldata),fixed = TRUE) 
+mudata<-alldata[,tmp_col]
+
+## remove untransformed params
+tmp_col<-grep("_pr.", colnames(mudata),fixed = TRUE) 
+mudata<-mudata[,-tmp_col] 
+
+#grab subdata and remove untransformed parameters
+tmp_col<-grep("sub_", colnames(alldata),fixed = TRUE) 
+subdata<-alldata[,tmp_col]
+
+## remove untransformed params
+tmp_col<-grep("_pr.", colnames(subdata),fixed = TRUE) 
+subdata<-subdata[,-tmp_col] 
+
+#combine
+alldata<-cbind(mudata,sigdata,subdata)
+params<-colnames(alldata)
+
+# calculate rhat, ESS
+fit_summaryfile<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/final_fit/fit_summary.RData"
+if(file.exists(fit_summaryfile)){ 
+  load(fit_summaryfile)
+}else{
+  for (i in 1:length(params)){
+    tmp_data<-alldata[,i]
+    tmp_matrix<-matrix(tmp_data,nrow=postwarmup_draws,ncol=n_chains,byrow=FALSE) #make into matrix (#draws * #chains)
+    tmp_summary<-data.frame(
+      parameter=params[i],
+      rhat=round(rhat(tmp_matrix),2),
+      bulk_ess=round(posterior::ess_bulk(tmp_matrix),0),
+      tail_ess=round(posterior::ess_tail(tmp_matrix),0))
+    
+    if(i==1){
+      fit_summary<-tmp_summary
+    }else{
+      fit_summary<-rbind(fit_summary,tmp_summary)
+    }
+  }
+  save(fit_summary,file=fit_summaryfile)
+}
+
+rownames(fit_summary)<-fit_summary[,1]
+
+#confirm that ESS of all parameters is >10,000
+fit_summary
+
+rm(list=c("fit_summary"))
+invisible(gc())
+
+#load real data
+real_data<-read.csv("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/data/gaze_beh.csv")
+real_data$subjID<-match(real_data$subj, unique(real_data$subj)) #subj IDs to sequential indexes 
+
+groups<-unique(real_data$group)
+subjs<-unique(real_data$subj)
+
+#group samples
+cols<-grep("mu_alpha.", colnames(alldata),fixed=TRUE)
+mu_alpha_samples<-alldata[,cols]
+cols<-grep("mu_beta.", colnames(alldata),fixed=TRUE)
+mu_beta_samples<-alldata[,cols]
+cols<-grep("mu_ndt.", colnames(alldata),fixed=TRUE) #ndt samples were scaled by max minRT of each group in stan. we need to back transform this to proportion and scale by .9 later
+mu_ndt_samples<-alldata[,cols]
+
+# emo * head condition
+## 1 = neutral forward
+## 2 = fearful forward
+## 3 = neutral deviated
+## 4 = fearful deviated
+
+cols<-grep("mu_delta_present_cond.", colnames(alldata),fixed=TRUE)[1:3]
+mu_delta_present_cond1_samples<-alldata[,cols]
+cols<-grep("mu_delta_present_cond.", colnames(alldata),fixed=TRUE)[4:6]
+mu_delta_present_cond2_samples<-alldata[,cols] 
+cols<-grep("mu_delta_present_cond.", colnames(alldata),fixed=TRUE)[7:9]
+mu_delta_present_cond3_samples<-alldata[,cols] 
+cols<-grep("mu_delta_present_cond.", colnames(alldata),fixed=TRUE)[10:12]
+mu_delta_present_cond4_samples<-alldata[,cols] 
+cols<-grep("mu_delta_absent_cond.", colnames(alldata),fixed=TRUE)[1:3]
+mu_delta_absent_cond1_samples<-alldata[,cols]
+cols<-grep("mu_delta_absent_cond.", colnames(alldata),fixed=TRUE)[4:6]
+mu_delta_absent_cond2_samples<-alldata[,cols]
+cols<-grep("mu_delta_absent_cond.", colnames(alldata),fixed=TRUE)[7:9]
+mu_delta_absent_cond3_samples<-alldata[,cols]
+cols<-grep("mu_delta_absent_cond.", colnames(alldata),fixed=TRUE)[10:12]
+mu_delta_absent_cond4_samples<-alldata[,cols]
+
+# group variances
+cols<-grep("sig_grp_alpha_pr", colnames(alldata),fixed=TRUE)
+sig_grp_alpha_pr_samples<-alldata[,cols]
+cols<-grep("sig_grp_beta_pr", colnames(alldata),fixed=TRUE)
+sig_grp_beta_pr_samples<-alldata[,cols]
+cols<-grep("sig_grp_delta_pr", colnames(alldata),fixed=TRUE)
+sig_grp_delta_pr_samples<-alldata[,cols]
+cols<-grep("sig_grp_ndt_pr", colnames(alldata),fixed=TRUE)
+sig_grp_ndt_pr_samples<-alldata[,cols]
+
+# we also need to adjust the mu NDT samples. these were scaled by the max minRT across all groups in the stan code. this is not what we want, so we need to transform back to a proportion
+for (i in 1:length(subjs)){
+  tmpdata<-subset(real_data,real_data$subj==subjs[i]) 
+  #get min Rt for this subj
+  tmp_minRT<-data.frame(subj=i,minRT=min(tmpdata$rt))
+  if (i==1){
+    minRT<-tmp_minRT
+  }else{
+    minRT<-rbind(minRT,tmp_minRT)
+  }
+}
+
+tmp_minrt<-cbind(data.frame(subjs),minRT[,2])
+rescale_mu_ndt<-max(minRT[,2])*0.9/1000 #do what was done in model and scale by max minRT*.9
+
+for (i in 1:length(groups)){
+  
+  delta_marginal_direct_forward_samples<-rowMeans(cbind(mu_delta_present_cond1_samples[,i],mu_delta_present_cond2_samples[,i])) 
+  delta_marginal_direct_deviated_samples<-rowMeans(cbind(mu_delta_present_cond3_samples[,i],mu_delta_present_cond4_samples[,i])) 
+  delta_marginal_indirect_forward_samples<-rowMeans(cbind(mu_delta_absent_cond1_samples[,i],mu_delta_absent_cond2_samples[,i])) 
+  delta_marginal_indirect_deviated_samples<-rowMeans(cbind(mu_delta_absent_cond3_samples[,i],mu_delta_absent_cond4_samples[,i])) 
+  
+  delta_marginal_direct_samples<-rowMeans(cbind(delta_marginal_direct_forward_samples,delta_marginal_direct_deviated_samples))
+  delta_marginal_indirect_samples<-rowMeans(cbind(delta_marginal_indirect_forward_samples,delta_marginal_indirect_deviated_samples))
+               
+  tmp_samples<-data.frame(group=rep(i,postwarmup_draws),
+                          beta=mu_beta_samples[,i],
+                          ndt=(mu_ndt_samples[,i]/rescale_mu_ndt)*0.9, # 1) rescale ndt back to proportion;  2) scale by .9 to match subject-level parameters
+                          alpha=mu_alpha_samples[,i],
+                          delta_direct_forward_neutral=mu_delta_present_cond1_samples[,i],
+                          delta_direct_forward_fearful=mu_delta_present_cond2_samples[,i],
+                          delta_direct_deviated_neutral=mu_delta_present_cond3_samples[,i],
+                          delta_direct_deviated_fearful=mu_delta_present_cond4_samples[,i],
+                          delta_indirect_forward_neutral=mu_delta_absent_cond1_samples[,i],
+                          delta_indirect_forward_fearful=mu_delta_absent_cond2_samples[,i],
+                          delta_indirect_deviated_neutral=mu_delta_absent_cond3_samples[,i],
+                          delta_indirect_deviated_fearful=mu_delta_absent_cond4_samples[,i],
+                          delta_marginal_direct_forward=delta_marginal_direct_forward_samples,
+                          delta_marginal_direct_deviated=delta_marginal_direct_deviated_samples,
+                          delta_marginal_indirect_forward=delta_marginal_indirect_forward_samples,
+                          delta_marginal_indirect_deviated=delta_marginal_indirect_deviated_samples,
+                          delta_marginal_bias=rowMeans(cbind(delta_marginal_direct_samples,delta_marginal_indirect_samples)),
+                          delta_marginal_bias_forward=rowMeans(cbind(delta_marginal_direct_forward_samples,delta_marginal_indirect_forward_samples)),
+                          delta_marginal_bias_deviated=rowMeans(cbind(delta_marginal_direct_deviated_samples,delta_marginal_indirect_deviated_samples)),
+                          delta_marginal=rowMeans(cbind(delta_marginal_direct_samples,(delta_marginal_indirect_samples*-1))),
+                          sigma_alpha=sig_grp_alpha_pr_samples[,i],
+                          sigma_beta=sig_grp_beta_pr_samples[,i],
+                          sigma_delta=sig_grp_delta_pr_samples[,i],
+                          sigma_ndt=sig_grp_ndt_pr_samples[,i])
+  if (i==1){
+    all_mu_samples<-tmp_samples
+  }else{
+    all_mu_samples<-rbind(all_mu_samples,tmp_samples)
+  }
+}
+
+all_mu_samples$group<-as.factor(all_mu_samples$group)
+
+rm(list=c("mu_beta_samples","mu_ndt_samples","mu_alpha_samples","sig_grp_alpha_pr_samples",
+          "sig_grp_beta_pr_samples","sig_grp_ndt_pr_samples","sig_grp_delta_pr_samples",
+          "mu_delta_present_cond1_samples","mu_delta_present_cond2_samples",
+          "mu_delta_present_cond3_samples","mu_delta_present_cond4_samples",
+          "mu_delta_absent_cond1_samples","mu_delta_absent_cond2_samples",
+          "mu_delta_absent_cond3_samples","mu_delta_absent_cond4_samples"))
+invisible(gc())
+
+levels(all_mu_samples$group)[levels(all_mu_samples$group) == "1"] = "HC"
+levels(all_mu_samples$group)[levels(all_mu_samples$group) == "2"] = "BD"
+levels(all_mu_samples$group)[levels(all_mu_samples$group) == "3"] = "SZ"
+
+```
+ 
+<br>
+ 
+# Betweeen- and Within-Group Differences in DDM Parameters
+ 
+## Group Differences*: Alpha, Beta, NDT
+ 
+```{r id3, echo=FALSE, fig.height=3, fig.show="hold", fig.width=3.5, message=FALSE, warning=FALSE}
+
+#alpha
+hc_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$alpha)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$alpha)),3)
+hc_minus_bd<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$alpha)-(subset(all_mu_samples,all_mu_samples$group=="BD")$alpha)),3)
+bd_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$alpha)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$alpha)),3)
+
+hc_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$alpha)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$alpha)),2)
+hc_minus_bd_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$alpha)-(subset(all_mu_samples,all_mu_samples$group=="BD")$alpha)),2)
+bd_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$alpha)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$alpha)),2)
+
+texta<-paste("HC-SZ: [",hc_minus_sz[1],",",hc_minus_sz[2],"], M = ",hc_minus_sz_mean,"\n",
+      "HC-BD: [",hc_minus_bd[1],",",hc_minus_bd[2],"], M = ",hc_minus_bd_mean,"\n",
+      "BD-SZ: [",bd_minus_sz[1],",",bd_minus_sz[2],"], M = ",bd_minus_sz_mean,sep="")
+
+hc_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$alpha)
+bd_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$alpha)
+sz_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$alpha)
+
+hc_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$alpha)
+bd_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$alpha)
+sz_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$alpha)
+
+plot_data<-data.frame(
+  group=c("HC","BD","SZ"),
+  mean=c(hc_mean,bd_mean,sz_mean),
+  hdi_lo=c(hc_hdi[1],bd_hdi[1],sz_hdi[1]),
+  hdi_hi=c(hc_hdi[2],bd_hdi[2],sz_hdi[2]))
+
+p<-ggplot(data=plot_data, aes(x=group, y=mean,color=group,alpha=.4)) +
+  geom_point(data=plot_data,alpha=1,position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=plot_data,aes(ymin=hdi_lo,ymax=hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  coord_cartesian(ylim = c(1.5,1.9))+
+  ggtitle("Threshold Separation") + xlab("") +
+  scale_x_discrete(limits=c("HC","BD","SZ"))+
+  scale_color_manual(values=c('#287c8e','#482475','#addc30'))+
+  ylab("Parameter Estimate")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+ 
+  annotate(geom = "text", x = 2, y = 1.87, label = texta, hjust = "center",size=3,lineheight=.9)
+print(p)
+
+#beta
+hc_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$beta)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$beta)),3)
+hc_minus_bd<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$beta)-(subset(all_mu_samples,all_mu_samples$group=="BD")$beta)),3)
+bd_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$beta)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$beta)),3)
+
+hc_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$beta)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$beta)),3)
+hc_minus_bd_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$beta)-(subset(all_mu_samples,all_mu_samples$group=="BD")$beta)),3)
+bd_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$beta)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$beta)),3)
+
+texta<-paste("HC-SZ: [",hc_minus_sz[1],",",hc_minus_sz[2],"], M = ",hc_minus_sz_mean,"\n",
+      "HC-BD: [",hc_minus_bd[1],",",hc_minus_bd[2],"], M = ",hc_minus_bd_mean,"\n",
+      "BD-SZ: [",bd_minus_sz[1],",",bd_minus_sz[2],"], M = ",bd_minus_sz_mean,sep="")
+
+hc_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$beta)
+bd_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$beta)
+sz_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$beta)
+
+hc_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$beta)
+bd_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$beta)
+sz_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$beta)
+
+plot_data<-data.frame(
+  group=c("HC","BD","SZ"),
+  mean=c(hc_mean,bd_mean,sz_mean),
+  hdi_lo=c(hc_hdi[1],bd_hdi[1],sz_hdi[1]),
+  hdi_hi=c(hc_hdi[2],bd_hdi[2],sz_hdi[2]))
+
+p<-ggplot(data=plot_data, aes(x=group, y=mean,color=group,alpha=.4)) +
+  geom_point(data=plot_data,alpha=1,position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=plot_data,aes(ymin=hdi_lo,ymax=hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  coord_cartesian(ylim = c(0.5,.57))+
+  ggtitle("Start Point") + xlab("") +
+  scale_color_manual(values=c('#287c8e','#482475','#addc30'))+
+  scale_x_discrete(limits=c("HC","BD","SZ"))+
+  ylab("Parameter Estimate")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+ 
+  annotate(geom = "text", x = 2, y = .565, label = texta, hjust = "center",size=3,lineheight=.9)
+print(p)
+
+#ndt
+hc_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$ndt)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$ndt)),4)
+hc_minus_bd<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$ndt)-(subset(all_mu_samples,all_mu_samples$group=="BD")$ndt)),4)
+bd_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$ndt)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$ndt)),4)
+
+hc_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$ndt)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$ndt)),4)
+hc_minus_bd_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$ndt)-(subset(all_mu_samples,all_mu_samples$group=="BD")$ndt)),4)
+bd_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$ndt)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$ndt)),4)
+
+texta<-paste("HC-SZ: [",hc_minus_sz[1],",",hc_minus_sz[2],"], M = ",hc_minus_sz_mean,"\n",
+      "HC-BD: [",hc_minus_bd[1],",",hc_minus_bd[2],"], M = ",hc_minus_bd_mean,"\n",
+      "BD-SZ: [",bd_minus_sz[1],",",bd_minus_sz[2],"], M = ",bd_minus_sz_mean,sep="")
+
+hc_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$ndt)
+bd_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$ndt)
+sz_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$ndt)
+
+hc_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$ndt)
+bd_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$ndt)
+sz_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$ndt)
+
+plot_data<-data.frame(
+  group=c("HC","BD","SZ"),
+  mean=c(hc_mean,bd_mean,sz_mean),
+  hdi_lo=c(hc_hdi[1],bd_hdi[1],sz_hdi[1]),
+  hdi_hi=c(hc_hdi[2],bd_hdi[2],sz_hdi[2]))
+
+p<-ggplot(data=plot_data, aes(x=group, y=mean,color=group,alpha=.4)) +
+  geom_point(data=plot_data,alpha=1,position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=plot_data,aes(ymin=hdi_lo,ymax=hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  coord_cartesian(ylim = c(0.8995,.9002))+
+  ggtitle("NDT") + xlab("") +
+  scale_color_manual(values=c('#287c8e','#482475','#addc30'))+
+  scale_x_discrete(limits=c("HC","BD","SZ"))+
+  ylab("Parameter Estimate")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+ 
+  annotate(geom = "text", x = 2, y = .90015, label = texta, hjust = "center",size=3,lineheight=.9)
+print(p)
+
+
+```
+ 
+## Group Differences^: Delta (by dx group, gaze, head, and emo conditions)
+ 
+```{r id4, echo=FALSE, fig.height=7.5, fig.show="hold", fig.width=3.5, message=FALSE, warning=FALSE}
+
+##############################################################################
+# head * gaze conditions for neutral trials
+##############################################################################
+
+#delta direct forward neutral
+hc_minus_sz1<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_neutral)),3)
+hc_minus_bd1<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_neutral)),3)
+bd_minus_sz1<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_neutral)),3)
+
+hc_minus_sz1_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_neutral)),3)
+hc_minus_bd1_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_neutral)),3)
+bd_minus_sz1_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_neutral)),3)
+
+#delta direct deviated neutral
+hc_minus_sz2<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_neutral)),3)
+hc_minus_bd2<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_neutral)),3)
+bd_minus_sz2<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_neutral)),3)
+
+hc_minus_sz2_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_neutral)),3)
+hc_minus_bd2_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_neutral)),3)
+bd_minus_sz2_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_neutral)),3)
+
+#delta INdirect forward neutral
+hc_minus_sz3<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_neutral)),3)
+hc_minus_bd3<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_neutral)),3)
+bd_minus_sz3<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_neutral)),3)
+
+hc_minus_sz3_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_neutral)),3)
+hc_minus_bd3_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_neutral)),3)
+bd_minus_sz3_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_neutral)),3)
+
+#delta INdirect deviated neutral
+hc_minus_sz4<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_neutral)),3)
+hc_minus_bd4<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_neutral)),3)
+bd_minus_sz4<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_neutral)),3)
+
+hc_minus_sz4_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_neutral)),3)
+hc_minus_bd4_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_neutral)),3)
+bd_minus_sz4_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_neutral)),3)
+
+texta<-paste("Direct, forward:\n",
+             "HC-SZ: [",hc_minus_sz1[1],",",hc_minus_sz1[2],"], M = ",hc_minus_sz1_mean,"\n",
+             "HC-BD: [",hc_minus_bd1[1],",",hc_minus_bd1[2],"], M = ",hc_minus_bd1_mean,"\n",
+             "BD-SZ: [",bd_minus_sz1[1],",",bd_minus_sz1[2],"], M = ",bd_minus_sz1_mean,"\n",
+             "Direct, deviated:\n",
+             "HC-SZ: [",hc_minus_sz2[1],",",hc_minus_sz2[2],"], M = ",hc_minus_sz2_mean,"\n",
+             "HC-BD: [",hc_minus_bd2[1],",",hc_minus_bd2[2],"], M = ",hc_minus_bd2_mean,"\n",
+             "BD-SZ: [",bd_minus_sz2[1],",",bd_minus_sz2[2],"], M = ",bd_minus_sz2_mean,"\n",
+             "Indirect, forward:\n",
+             "HC-SZ: [",hc_minus_sz3[1],",",hc_minus_sz3[2],"], M = ",hc_minus_sz3_mean,"\n",
+             "HC-BD: [",hc_minus_bd3[1],",",hc_minus_bd3[2],"], M = ",hc_minus_bd3_mean,"\n",
+             "BD-SZ: [",bd_minus_sz3[1],",",bd_minus_sz3[2],"], M = ",bd_minus_sz3_mean,"\n",
+             "Indirect, deviated:\n",
+             "HC-SZ: [",hc_minus_sz4[1],",",hc_minus_sz4[2],"], M = ",hc_minus_sz4_mean,"\n",
+             "HC-BD: [",hc_minus_bd4[1],",",hc_minus_bd4[2],"], M = ",hc_minus_bd4_mean,"\n",
+             "BD-SZ: [",bd_minus_sz4[1],",",bd_minus_sz4[2],"], M = ",bd_minus_sz4_mean,
+             sep="")
+
+hc_hdi1<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_neutral)
+bd_hdi1<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_neutral)
+sz_hdi1<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_neutral)
+
+hc_mean1<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_neutral)
+bd_mean1<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_neutral)
+sz_mean1<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_neutral)
+
+hc_hdi2<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_neutral)
+bd_hdi2<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_neutral)
+sz_hdi2<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_neutral)
+
+hc_mean2<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_neutral)
+bd_mean2<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_neutral)
+sz_mean2<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_neutral)
+
+hc_hdi3<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_neutral)
+bd_hdi3<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_neutral)
+sz_hdi3<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_neutral)
+
+hc_mean3<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_neutral)
+bd_mean3<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_neutral)
+sz_mean3<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_neutral)
+
+hc_hdi4<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_neutral)
+bd_hdi4<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_neutral)
+sz_hdi4<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_neutral)
+
+hc_mean4<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_neutral)
+bd_mean4<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_neutral)
+sz_mean4<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_neutral)
+
+plot_data<-data.frame(
+  group=rep(c("HC","BD","SZ"),4),
+  cond=c(rep("Direct-Forward",3),rep("Direct-Deviated",3),rep("Indirect-Forward",3),rep("Indirect-Deviated",3)),
+  mean=c(hc_mean1,bd_mean1,sz_mean1,hc_mean2,bd_mean2,sz_mean2,hc_mean3,bd_mean3,sz_mean3,hc_mean4,bd_mean4,sz_mean4),
+  hdi_lo=c(hc_hdi1[1],bd_hdi1[1],sz_hdi1[1],hc_hdi2[1],bd_hdi2[1],sz_hdi2[1],hc_hdi3[1],bd_hdi3[1],sz_hdi3[1],hc_hdi4[1],bd_hdi4[1],sz_hdi4[1]),
+  hdi_hi=c(hc_hdi1[2],bd_hdi1[2],sz_hdi1[2],hc_hdi2[2],bd_hdi2[2],sz_hdi2[2],hc_hdi3[2],bd_hdi3[2],sz_hdi3[2],hc_hdi4[2],bd_hdi4[2],sz_hdi4[2]))
+
+p<-ggplot(data=plot_data, aes(x=factor(cond,levels=c("Direct-Forward","Direct-Deviated","Indirect-Forward","Indirect-Deviated")), y=mean,color=factor(group,levels=c("HC","BD","SZ")),alpha=.4)) +
+  geom_point(data=plot_data,alpha=1,position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=plot_data,aes(ymin=hdi_lo,ymax=hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  coord_cartesian(ylim = c(-3.5,6.5))+
+  scale_color_manual(values=c('#482475','#287c8e','#addc30'))+
+  ggtitle("Model 10: Delta (Neutral Emo)") + xlab("") +
+  ylab("Parameter Estimate")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+ 
+  annotate(geom = "text", x = 4.5, y = 5, label = texta, hjust = "right",size=3,lineheight=.9)+
+  labs(colour="group")
+print(p)
+
+##############################################################################
+# head * gaze conditions for fearful trials
+##############################################################################
+
+#delta direct forward fearful
+hc_minus_sz1<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_fearful)),3)
+hc_minus_bd1<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_fearful)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_fearful)),3)
+bd_minus_sz1<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_fearful)),3)
+
+hc_minus_sz1_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_fearful)),3)
+hc_minus_bd1_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_fearful)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_fearful)),3)
+bd_minus_sz1_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_fearful)),3)
+
+#delta direct deviated fearful
+hc_minus_sz2<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_fearful)),3)
+hc_minus_bd2<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_fearful)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_fearful)),3)
+bd_minus_sz2<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_fearful)),3)
+
+hc_minus_sz2_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_fearful)),3)
+hc_minus_bd2_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_fearful)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_fearful)),3)
+bd_minus_sz2_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_fearful)),3)
+
+#delta INdirect forward fearful
+hc_minus_sz3<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_fearful)),3)
+hc_minus_bd3<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_fearful)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_fearful)),3)
+bd_minus_sz3<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_fearful)),3)
+
+hc_minus_sz3_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_fearful)),3)
+hc_minus_bd3_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_fearful)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_fearful)),3)
+bd_minus_sz3_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_fearful)),3)
+
+#delta INdirect deviated fearful
+hc_minus_sz4<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_fearful)),3)
+hc_minus_bd4<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_fearful)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_fearful)),3)
+bd_minus_sz4<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_fearful)),3)
+
+hc_minus_sz4_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_fearful)),3)
+hc_minus_bd4_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_fearful)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_fearful)),3)
+bd_minus_sz4_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_fearful)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_fearful)),3)
+
+texta<-paste("Direct, forward:\n",
+             "HC-SZ: [",hc_minus_sz1[1],",",hc_minus_sz1[2],"], M = ",hc_minus_sz1_mean,"\n",
+             "HC-BD: [",hc_minus_bd1[1],",",hc_minus_bd1[2],"], M = ",hc_minus_bd1_mean,"\n",
+             "BD-SZ: [",bd_minus_sz1[1],",",bd_minus_sz1[2],"], M = ",bd_minus_sz1_mean,"\n",
+             "Direct, deviated:\n",
+             "HC-SZ: [",hc_minus_sz2[1],",",hc_minus_sz2[2],"], M = ",hc_minus_sz2_mean,"\n",
+             "HC-BD: [",hc_minus_bd2[1],",",hc_minus_bd2[2],"], M = ",hc_minus_bd2_mean,"\n",
+             "BD-SZ: [",bd_minus_sz2[1],",",bd_minus_sz2[2],"], M = ",bd_minus_sz2_mean,"\n",
+             "Indirect, forward:\n",
+             "HC-SZ: [",hc_minus_sz3[1],",",hc_minus_sz3[2],"], M = ",hc_minus_sz3_mean,"\n",
+             "HC-BD: [",hc_minus_bd3[1],",",hc_minus_bd3[2],"], M = ",hc_minus_bd3_mean,"\n",
+             "BD-SZ: [",bd_minus_sz3[1],",",bd_minus_sz3[2],"], M = ",bd_minus_sz3_mean,"\n",
+             "Indirect, deviated:\n",
+             "HC-SZ: [",hc_minus_sz4[1],",",hc_minus_sz4[2],"], M = ",hc_minus_sz4_mean,"\n",
+             "HC-BD: [",hc_minus_bd4[1],",",hc_minus_bd4[2],"], M = ",hc_minus_bd4_mean,"\n",
+             "BD-SZ: [",bd_minus_sz4[1],",",bd_minus_sz4[2],"], M = ",bd_minus_sz4_mean,
+             sep="")
+
+hc_hdi1<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_fearful)
+bd_hdi1<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_fearful)
+sz_hdi1<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_fearful)
+
+hc_mean1<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_fearful)
+bd_mean1<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_fearful)
+sz_mean1<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_fearful)
+
+hc_hdi2<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_fearful)
+bd_hdi2<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_fearful)
+sz_hdi2<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_fearful)
+
+hc_mean2<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_fearful)
+bd_mean2<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_fearful)
+sz_mean2<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_fearful)
+
+hc_hdi3<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_fearful)
+bd_hdi3<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_fearful)
+sz_hdi3<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_fearful)
+
+hc_mean3<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_fearful)
+bd_mean3<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_fearful)
+sz_mean3<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_fearful)
+
+hc_hdi4<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_fearful)
+bd_hdi4<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_fearful)
+sz_hdi4<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_fearful)
+
+hc_mean4<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_fearful)
+bd_mean4<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_fearful)
+sz_mean4<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_fearful)
+
+plot_data<-data.frame(
+  group=rep(c("HC","BD","SZ"),4),
+  cond=c(rep("Direct-Forward",3),rep("Direct-Deviated",3),rep("Indirect-Forward",3),rep("Indirect-Deviated",3)),
+  mean=c(hc_mean1,bd_mean1,sz_mean1,hc_mean2,bd_mean2,sz_mean2,hc_mean3,bd_mean3,sz_mean3,hc_mean4,bd_mean4,sz_mean4),
+  hdi_lo=c(hc_hdi1[1],bd_hdi1[1],sz_hdi1[1],hc_hdi2[1],bd_hdi2[1],sz_hdi2[1],hc_hdi3[1],bd_hdi3[1],sz_hdi3[1],hc_hdi4[1],bd_hdi4[1],sz_hdi4[1]),
+  hdi_hi=c(hc_hdi1[2],bd_hdi1[2],sz_hdi1[2],hc_hdi2[2],bd_hdi2[2],sz_hdi2[2],hc_hdi3[2],bd_hdi3[2],sz_hdi3[2],hc_hdi4[2],bd_hdi4[2],sz_hdi4[2]))
+
+p<-ggplot(data=plot_data, aes(x=factor(cond,levels=c("Direct-Forward","Direct-Deviated","Indirect-Forward","Indirect-Deviated")), y=mean,color=factor(group,levels=c("HC","BD","SZ")),alpha=.4)) +
+  geom_point(data=plot_data,alpha=1,position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=plot_data,aes(ymin=hdi_lo,ymax=hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  coord_cartesian(ylim = c(-3.5,6.5))+
+  scale_color_manual(values=c('#482475','#287c8e','#addc30'))+
+  ggtitle("Model 10: Delta (Fearful Emo)") + xlab("") +
+  ylab("Parameter Estimate")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+ 
+  annotate(geom = "text", x = 4.5, y = 5, label = texta, hjust = "right",size=3,lineheight=.9)+
+  labs(colour="group")
+print(p)
+
+```
+ 
+## Group Differences*: Delta (by dx group, gaze, and head conditions)
+
+```{r id6, echo=FALSE, fig.height=6, fig.show="hold", fig.width=3.5, message=FALSE, warning=FALSE,tidy=T}
+
+#delta direct forward
+hc_minus_sz1<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_forward)),3)
+hc_minus_bd1<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_forward)),3)
+bd_minus_sz1<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_forward)),3)
+
+hc_minus_sz1_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_forward)),3)
+hc_minus_bd1_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_forward)),3)
+bd_minus_sz1_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_forward)),3)
+
+#delta indirect forward
+hc_minus_sz2<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_forward)),3)
+hc_minus_bd2<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_forward)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_forward)),3)
+bd_minus_sz2<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_forward)),3)
+
+hc_minus_sz2_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_forward)),3)
+hc_minus_bd2_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_forward)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_forward)),3)
+bd_minus_sz2_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_forward)),3)
+
+texta<-paste("Direct ",
+      "\nHC-SZ: [",hc_minus_sz1[1],",",hc_minus_sz1[2],"], M = ",hc_minus_sz1_mean,"\n",
+      "HC-BD: [",hc_minus_bd1[1],",",hc_minus_bd1[2],"], M = ",hc_minus_bd1_mean,"\n",
+      "BD-SZ: [",bd_minus_sz1[1],",",bd_minus_sz1[2],"], M = ",bd_minus_sz1_mean,"\n",
+  "Indirect",
+  "\nHC-SZ: [",hc_minus_sz2[1],",",hc_minus_sz2[2],"], M = ",hc_minus_sz2_mean,"\n",
+      "HC-BD: [",hc_minus_bd2[1],",",hc_minus_bd2[2],"], M = ",hc_minus_bd2_mean,"\n",
+      "BD-SZ: [",bd_minus_sz2[1],",",bd_minus_sz2[2],"], M = ",bd_minus_sz2_mean,
+  sep="")
+
+hc_hdi1<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_forward)
+bd_hdi1<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_forward)
+sz_hdi1<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_forward)
+
+hc_mean1<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_forward)
+bd_mean1<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_forward)
+sz_mean1<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_forward)
+
+hc_hdi2<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_forward)
+bd_hdi2<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_forward)
+sz_hdi2<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_forward)
+
+hc_mean2<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_forward)
+bd_mean2<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_forward)
+sz_mean2<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_forward)
+
+plot_data<-data.frame(
+  group=rep(c("HC","BD","SZ"),2),
+  cond=c(rep("Direct",3),rep("Indirect",3)),
+  mean=c(hc_mean1,bd_mean1,sz_mean1,hc_mean2,bd_mean2,sz_mean2),
+  hdi_lo=c(hc_hdi1[1],bd_hdi1[1],sz_hdi1[1],hc_hdi2[1],bd_hdi2[1],sz_hdi2[1]),
+  hdi_hi=c(hc_hdi1[2],bd_hdi1[2],sz_hdi1[2],hc_hdi2[2],bd_hdi2[2],sz_hdi2[2]))
+
+p<-ggplot(data=plot_data, aes(x=cond, y=mean,color=factor(group,levels=c("HC","BD","SZ")),alpha=.4)) +
+  geom_point(data=plot_data,alpha=1,position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=plot_data,aes(ymin=hdi_lo,ymax=hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  coord_cartesian(ylim = c(-3.5,4))+
+  scale_color_manual(values=c('#482475','#287c8e','#addc30'))+
+  ggtitle("Drift Rate: Forward Heads") + xlab("") +
+  ylab("Parameter Estimate")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+ 
+  annotate(geom = "text", x = 1.5, y = 3.2, label = texta, hjust = "center",size=3,lineheight=.9)+
+  labs(colour="group")
+print(p)
+
+# now do deviated heads
+
+#delta direct deviated
+hc_minus_sz1<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_deviated)),3)
+hc_minus_bd1<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_deviated)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_deviated)),3)
+bd_minus_sz1<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_deviated)),3)
+
+hc_minus_sz1_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_deviated)),3)
+hc_minus_bd1_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_deviated)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_deviated)),3)
+bd_minus_sz1_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_deviated)),3)
+
+#delta indirect deviated
+hc_minus_sz2<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_deviated)),3)
+hc_minus_bd2<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_deviated)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_deviated)),3)
+bd_minus_sz2<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_deviated)),3)
+
+hc_minus_sz2_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_deviated)),3)
+hc_minus_bd2_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_deviated)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_deviated)),3)
+bd_minus_sz2_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_deviated)),3)
+
+texta<-paste("Direct ",
+      "\nHC-SZ: [",hc_minus_sz1[1],",",hc_minus_sz1[2],"], M = ",hc_minus_sz1_mean,"\n",
+      "HC-BD: [",hc_minus_bd1[1],",",hc_minus_bd1[2],"], M = ",hc_minus_bd1_mean,"\n",
+      "BD-SZ: [",bd_minus_sz1[1],",",bd_minus_sz1[2],"], M = ",bd_minus_sz1_mean,"\n",
+  "Indirect",
+  "\nHC-SZ: [",hc_minus_sz2[1],",",hc_minus_sz2[2],"], M = ",hc_minus_sz2_mean,"\n",
+      "HC-BD: [",hc_minus_bd2[1],",",hc_minus_bd2[2],"], M = ",hc_minus_bd2_mean,"\n",
+      "BD-SZ: [",bd_minus_sz2[1],",",bd_minus_sz2[2],"], M = ",bd_minus_sz2_mean,
+  sep="")
+
+hc_hdi1<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_deviated)
+bd_hdi1<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_deviated)
+sz_hdi1<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_deviated)
+
+hc_mean1<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_deviated)
+bd_mean1<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_deviated)
+sz_mean1<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_deviated)
+
+hc_hdi2<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_deviated)
+bd_hdi2<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_deviated)
+sz_hdi2<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_deviated)
+
+hc_mean2<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_deviated)
+bd_mean2<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_deviated)
+sz_mean2<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_deviated)
+
+plot_data<-data.frame(
+  group=rep(c("HC","BD","SZ"),2),
+  cond=c(rep("Direct",3),rep("Indirect",3)),
+  mean=c(hc_mean1,bd_mean1,sz_mean1,hc_mean2,bd_mean2,sz_mean2),
+  hdi_lo=c(hc_hdi1[1],bd_hdi1[1],sz_hdi1[1],hc_hdi2[1],bd_hdi2[1],sz_hdi2[1]),
+  hdi_hi=c(hc_hdi1[2],bd_hdi1[2],sz_hdi1[2],hc_hdi2[2],bd_hdi2[2],sz_hdi2[2]))
+
+p<-ggplot(data=plot_data, aes(x=cond, y=mean,color=factor(group,levels=c("HC","BD","SZ")),alpha=.4)) +
+  geom_point(data=plot_data,alpha=1,position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=plot_data,aes(ymin=hdi_lo,ymax=hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  coord_cartesian(ylim = c(-3.5,4))+
+  scale_color_manual(values=c('#482475','#287c8e','#addc30'))+
+  ggtitle("Drift Rate: Deviated Heads") + xlab("") +
+  ylab("Parameter Estimate")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+ 
+  annotate(geom = "text", x = 1.5, y = 3.22, label = texta, hjust = "center",size=3,lineheight=.9)+
+  labs(colour="group")
+print(p)
+
+```
+
+## Group Differences*: Delta (by dx group only)
+
+Here, we marginalize over all task conditions (emo, then head, then gaze) for drift rates to get overall measure of overall evidence accumulation efficiency for all three groups.
+
+```{r id61, echo=FALSE, fig.height=3, fig.show="hold", fig.width=3.5, message=FALSE, warning=FALSE,tidy=T}
+
+# delta (across all conditions)
+hc_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal)),3)
+hc_minus_bd<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal)),3)
+bd_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal)),3)
+
+hc_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal)),2)
+hc_minus_bd_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal)),2)
+bd_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal)),2)
+
+texta<-paste("HC-SZ: [",hc_minus_sz[1],",",hc_minus_sz[2],"], M = ",hc_minus_sz_mean,"\n",
+      "HC-BD: [",hc_minus_bd[1],",",hc_minus_bd[2],"], M = ",hc_minus_bd_mean,"\n",
+      "BD-SZ: [",bd_minus_sz[1],",",bd_minus_sz[2],"], M = ",bd_minus_sz_mean,sep="")
+
+hc_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal)
+bd_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal)
+sz_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal)
+
+hc_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal)
+bd_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal)
+sz_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal)
+
+plot_data<-data.frame(
+  group=c("HC","BD","SZ"),
+  mean=c(hc_mean,bd_mean,sz_mean),
+  hdi_lo=c(hc_hdi[1],bd_hdi[1],sz_hdi[1]),
+  hdi_hi=c(hc_hdi[2],bd_hdi[2],sz_hdi[2]))
+
+p<-ggplot(data=plot_data, aes(x=group, y=mean,color=group,alpha=.4)) +
+  geom_point(data=plot_data,alpha=1,position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=plot_data,aes(ymin=hdi_lo,ymax=hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  coord_cartesian(ylim = c(1,2.5))+
+  ggtitle("Delta (Overall)") + xlab("") +
+  scale_x_discrete(limits=c("HC","BD","SZ"))+
+  scale_color_manual(values=c('#287c8e','#482475','#addc30'))+
+  ylab("Parameter Estimate")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+
+  annotate(geom = "text", x = 2, y = 2.3, label = texta, hjust = "center",size=3,lineheight=.9)
+print(p)
+
+```
+ 
+## Condition Effects^: Delta (task condition effects on drift rates)
+
+As shown below, there are not credible differences in drift rates between emotion conditions. We see facilitation effects of gaze direction in all 3 groups for deviated heads (higher drift rates for indirect gaze when heads are deviated). However, we don't see this as consistently for forwards heads. We do see credible differences in drift rate based on the head orientation direction of stimuli, such that individuals show more efficient evidence accumulation for forward vs deviated heads. This is found in all three groups. As such, we will marginalize over emotion conditions for drift rates (and, similarly, for drift bias) for group difference measures. Then for correlation analyses, we will further marginalize over gaze direction for drift rates to reduce the number of comparisons.
+
+### Condition Effects: Delta (effect of emotion on drift rate)
+
+```{r id5, echo=FALSE, fig.height=2, fig.show="hold", fig.width=8, message=FALSE, warning=FALSE, dpi=300, out.width='1500px'}
+
+#Note: we multiply indirect delta samples by -1 so the direction of the param values for direct/indirect is equivalent and, therefore more easily interpretable (ie for all conditions/contrast, high drift rates=better evidence accumulation)
+
+#make data.frame to hold results
+within_effects<-setNames(data.frame(matrix(ncol = 7, nrow = 0)), c("group","cond_gaze","cond_head","emo_contrast", "HDI_lo", "HDI_hi","mean"))
+
+#delta neutral minus fearful emo for FORWARD heads and DIRECT gaze
+within_effects[1,]<-c("hc","direct","forward","neutral-fearful",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_fearful)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_forward_fearful)))
+within_effects[2,]<-c("bd","direct","forward","neutral-fearful",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_fearful)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_forward_fearful)))
+within_effects[3,]<-c("sz","direct","forward","neutral-fearful",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_fearful)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_forward_fearful)))
+
+#delta neutral minus fearful emo for FORWARD heads and INDIRECT gaze (marginalized over emo)
+within_effects[4,]<-c("hc","indirect","forward","neutral-fearful",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_neutral*-1)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_fearful*-1)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_neutral*-1)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_forward_fearful*-1)))
+within_effects[5,]<-c("bd","indirect","forward","neutral-fearful",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_neutral*-1)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_fearful*-1)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_neutral*-1)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_forward_fearful*-1)))
+within_effects[6,]<-c("sz","indirect","forward","neutral-fearful",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_neutral*-1)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_fearful*-1)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_neutral*-1)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_forward_fearful*-1)))
+
+#delta neutral minus fearful emo for deviated heads and DIRECT gaze (marginalized over emo)
+within_effects[7,]<-c("hc","direct","deviated","neutral-fearful",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_fearful)),
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_direct_deviated_fearful)))
+within_effects[8,]<-c("bd","direct","deviated","neutral-fearful",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_fearful)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_direct_deviated_fearful)))
+within_effects[9,]<-c("sz","direct","deviated","neutral-fearful",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_fearful)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_neutral)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_direct_deviated_fearful)))
+
+#delta neutral minus fearful emo for deviated heads and INDIRECT gaze (marginalized over emo)
+within_effects[10,]<-c("hc","indirect","deviated","neutral-fearful",
+                       HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_neutral*-1)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_fearful*-1)),
+                       mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_neutral*-1)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_indirect_deviated_fearful*-1)))
+within_effects[11,]<-c("bd","indirect","deviated","neutral-fearful",
+                       HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_neutral*-1)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_fearful*-1)),
+                       mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_neutral*-1)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_indirect_deviated_fearful*-1)))
+within_effects[12,]<-c("sz","indirect","deviated","neutral-fearful",
+                       HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_neutral*-1)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_fearful*-1)),
+                       mean((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_neutral*-1)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_indirect_deviated_fearful*-1)))
+
+#round values
+within_effects$HDI_lo<-round(as.numeric(within_effects$HDI_lo),3)
+within_effects$HDI_hi<-round(as.numeric(within_effects$HDI_hi),3)
+within_effects$mean<-round(as.numeric(within_effects$mean),3)
+
+within_effects %>%
+  kbl(caption = "Posterior Differences in Drift Rates Between Emotion Conditions (by Dx Group, Gaze Direction, Head Orientation)",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+ 
+### Condition Effects: Delta (effect of gaze direction on drift rate)
+
+```{r id10, echo=FALSE, fig.height=6, fig.show="hold", fig.width=6, message=FALSE, warning=FALSE, dpi=300, out.width='1500px'}
+
+#make data.frame to hold results
+within_effects<-setNames(data.frame(matrix(ncol = 6, nrow = 0)), c("group","cond_head","gaze_contrast", "HDI_lo", "HDI_hi","mean"))
+
+#Note: here, we multiply indirect delta samples by -1 so the direction of the param values for direct/indirect is equivalent and, therefore more easily interpretable (ie for all conditions/contrast, faster drift rates=better)
+
+#delta direct minus indirect gaze for FORWARD heads (marginalized over emo)
+within_effects[1,]<-c("hc","forward","direct-indirect",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_forward*-1)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_forward*-1)))
+within_effects[2,]<-c("bd","forward","direct-indirect",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_forward*-1)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_forward*-1)))
+within_effects[3,]<-c("sz","forward","direct-indirect",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_forward*-1)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_forward*-1)))
+
+#delta direct minus indirect gaze for DEVIATED heads (marginalized over emo)
+within_effects[4,]<-c("hc","deviated","direct-indirect",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_deviated)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_deviated*-1)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_deviated)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_deviated*-1)))
+within_effects[5,]<-c("bd","deviated","direct-indirect",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_deviated)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_deviated*-1)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_deviated)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_deviated*-1)))
+within_effects[6,]<-c("sz","deviated","direct-indirect",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_deviated*-1)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_deviated*-1)))
+
+#round values
+within_effects$HDI_lo<-round(as.numeric(within_effects$HDI_lo),3)
+within_effects$HDI_hi<-round(as.numeric(within_effects$HDI_hi),3)
+within_effects$mean<-round(as.numeric(within_effects$mean),3)
+
+within_effects %>%
+  kbl(caption = "Posterior Differences in Drift Rates Between Gaze Direction Conditions (by Dx Group, Head Orientation)",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+ 
+### Condition Effects: Delta (effect of head orientation on drift rate)
+ 
+```{r id11, echo=FALSE, fig.height=2, fig.show="hold", fig.width=6, message=FALSE, warning=FALSE, dpi=300, out.width='1500px'}
+
+#Note: here, we multiply indirect delta samples by -1 so the direction of the param values for direct/indirect is equivalent and, therefore more easily interpretable (ie for all conditions/contrast, faster drift rates=better)
+
+#make data.frame to hold results
+within_effects<-setNames(data.frame(matrix(ncol = 6, nrow = 0)), c("group","cond_gaze","head_contrast", "HDI_lo", "HDI_hi","mean"))
+
+#delta forward minus deviated head for DIRECT gaze (marginalized over emo)
+within_effects[1,]<-c("hc","direct","forward-deviated",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_deviated)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_direct_deviated)))
+within_effects[2,]<-c("bd","direct","forward-deviated",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_deviated)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_direct_deviated)))
+within_effects[3,]<-c("sz","direct","forward-deviated",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_deviated)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_direct_deviated)))
+
+#delta forward minus deviated head for INDIRECT gaze (marginalized over emo)
+within_effects[4,]<-c("hc","indirect","forward-deviated",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_forward*-1)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_deviated*-1)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_forward*-1)-(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_indirect_deviated*-1)))
+within_effects[5,]<-c("bd","indirect","forward-deviated",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_forward*-1)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_deviated*-1)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_forward*-1)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_indirect_deviated*-1)))
+within_effects[6,]<-c("sz","indirect","forward-deviated",
+                      HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_forward*-1)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_deviated*-1)),
+                      mean((subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_forward*-1)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_indirect_deviated*-1)))
+
+#round values
+within_effects$HDI_lo<-round(as.numeric(within_effects$HDI_lo),3)
+within_effects$HDI_hi<-round(as.numeric(within_effects$HDI_hi),3)
+within_effects$mean<-round(as.numeric(within_effects$mean),3)
+
+within_effects %>%
+  kbl(caption = "Posterior Differences in Drift Rates Between Head Orientation Conditions (by Dx Group, Gaze Direction)",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+ 
+## Group Differences*: Delta bias (by dx group, head orientation)
+ 
+```{r id8, echo=FALSE, fig.height=3, fig.show="hold", fig.width=3.5, message=FALSE, warning=FALSE}
+
+#delta bias - forward
+hc_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias_forward)),3)
+hc_minus_bd<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias_forward)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias_forward)),3)
+bd_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias_forward)),3)
+
+hc_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias_forward)),3)
+hc_minus_bd_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias_forward)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias_forward)),3)
+bd_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias_forward)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias_forward)),3)
+
+texta<-paste("HC-SZ: [",hc_minus_sz[1],",",hc_minus_sz[2],"], M = ",hc_minus_sz_mean,"\n",
+      "HC-BD: [",hc_minus_bd[1],",",hc_minus_bd[2],"], M = ",hc_minus_bd_mean,"\n",
+      "BD-SZ: [",bd_minus_sz[1],",",bd_minus_sz[2],"], M = ",bd_minus_sz_mean,sep="")
+
+hc_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias_forward)
+bd_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias_forward)
+sz_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias_forward)
+
+hc_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias_forward)
+bd_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias_forward)
+sz_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias_forward)
+
+plot_data<-data.frame(
+  group=c("HC","BD","SZ"),
+  mean=c(hc_mean,bd_mean,sz_mean),
+  hdi_lo=c(hc_hdi[1],bd_hdi[1],sz_hdi[1]),
+  hdi_hi=c(hc_hdi[2],bd_hdi[2],sz_hdi[2]))
+
+p<-ggplot(data=plot_data, aes(x=group, y=mean,color=group,alpha=.4)) +
+  geom_point(data=plot_data,alpha=1,position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=plot_data,aes(ymin=hdi_lo,ymax=hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  coord_cartesian(ylim = c(-1.5,.5))+
+  ggtitle("Drift Bias: Forward Heads") + xlab("") +
+  scale_x_discrete(limits=c("HC","BD","SZ"))+
+  scale_color_manual(values=c('#287c8e','#482475','#addc30'))+
+  ylab("Parameter Estimate")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+ 
+  annotate(geom = "text", x = 2, y = -1, label = texta, hjust = "center",size=3,lineheight=.9)
+print(p)
+
+#delta bias - deviated
+hc_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias_deviated)),3)
+hc_minus_bd<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias_deviated)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias_deviated)),3)
+bd_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias_deviated)),3)
+
+hc_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias_deviated)),3)
+hc_minus_bd_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias_deviated)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias_deviated)),3)
+bd_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias_deviated)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias_deviated)),3)
+
+texta<-paste("HC-SZ: [",hc_minus_sz[1],",",hc_minus_sz[2],"], M = ",hc_minus_sz_mean,"\n",
+      "HC-BD: [",hc_minus_bd[1],",",hc_minus_bd[2],"], M = ",hc_minus_bd_mean,"\n",
+      "BD-SZ: [",bd_minus_sz[1],",",bd_minus_sz[2],"], M = ",bd_minus_sz_mean,sep="")
+
+hc_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias_deviated)
+bd_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias_deviated)
+sz_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias_deviated)
+
+hc_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias_deviated)
+bd_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias_deviated)
+sz_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias_deviated)
+
+plot_data<-data.frame(
+  group=c("HC","BD","SZ"),
+  mean=c(hc_mean,bd_mean,sz_mean),
+  hdi_lo=c(hc_hdi[1],bd_hdi[1],sz_hdi[1]),
+  hdi_hi=c(hc_hdi[2],bd_hdi[2],sz_hdi[2]))
+
+p<-ggplot(data=plot_data, aes(x=group, y=mean,color=group,alpha=.4)) +
+  geom_point(data=plot_data,alpha=1,position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=plot_data,aes(ymin=hdi_lo,ymax=hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  coord_cartesian(ylim = c(-1.5,.5))+
+  ggtitle("Drift Bias: Deviated Heads") + xlab("") +
+  scale_x_discrete(limits=c("HC","BD","SZ"))+
+  scale_color_manual(values=c('#287c8e','#482475','#addc30'))+
+  ylab("Parameter Estimate")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+ 
+  annotate(geom = "text", x = 2, y = -.05, label = texta, hjust = "center",size=3,lineheight=.9)
+print(p)
+
+```
+
+## Group Differences^: Delta bias (by dx group only)
+
+Overall magnitude of drift bias (across head orientation conditions) by dx group. Calculated by marginalizing over emotion, then head orientation.
+
+```{r id81, echo=FALSE, fig.height=3, fig.show="hold", fig.width=3.5, message=FALSE, warning=FALSE}
+
+#delta bias - overall
+hc_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias)),3)
+hc_minus_bd<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias)),3)
+bd_minus_sz<-round(HDIofMCMC((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias)),3)
+
+hc_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias)),3)
+hc_minus_bd_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias)-(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias)),3)
+bd_minus_sz_mean<-round(mean((subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias)-(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias)),3)
+
+texta<-paste("HC-SZ: [",hc_minus_sz[1],",",hc_minus_sz[2],"], M = ",hc_minus_sz_mean,"\n",
+      "HC-BD: [",hc_minus_bd[1],",",hc_minus_bd[2],"], M = ",hc_minus_bd_mean,"\n",
+      "BD-SZ: [",bd_minus_sz[1],",",bd_minus_sz[2],"], M = ",bd_minus_sz_mean,sep="")
+
+hc_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias)
+bd_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias)
+sz_hdi<-HDIofMCMC(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias)
+
+hc_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="HC")$delta_marginal_bias)
+bd_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="BD")$delta_marginal_bias)
+sz_mean<-mean(subset(all_mu_samples,all_mu_samples$group=="SZ")$delta_marginal_bias)
+
+plot_data<-data.frame(
+  group=c("HC","BD","SZ"),
+  mean=c(hc_mean,bd_mean,sz_mean),
+  hdi_lo=c(hc_hdi[1],bd_hdi[1],sz_hdi[1]),
+  hdi_hi=c(hc_hdi[2],bd_hdi[2],sz_hdi[2]))
+
+p<-ggplot(data=plot_data, aes(x=group, y=mean,color=group,alpha=.4)) +
+  geom_point(data=plot_data,alpha=1,position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=plot_data,aes(ymin=hdi_lo,ymax=hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  coord_cartesian(ylim = c(-.9,0.03))+
+  ggtitle("Drift Bias (Overall)") + xlab("") +
+  scale_x_discrete(limits=c("HC","BD","SZ"))+
+  scale_color_manual(values=c('#287c8e','#482475','#addc30'))+
+  ylab("Parameter Estimate")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+
+  annotate(geom = "text", x = 2, y = -.05, label = texta, hjust = "center",size=3,lineheight=.9)
+print(p)
+
+```
+ 
+## Condition Effects^: Delta bias (by head orientation only)
+
+Look at overall magnitude of drift bias in both head orientation conditions, marginalizing over all groups.
+ 
+```{r id9, echo=FALSE, fig.height=3, fig.show="hold", fig.width=5, message=FALSE, warning=FALSE}
+
+temp_for<-rowMeans(cbind(all_mu_samples$delta_marginal_bias_forward[which(all_mu_samples$group=="HC")],
+                         all_mu_samples$delta_marginal_bias_forward[which(all_mu_samples$group=="BD")],
+                         all_mu_samples$delta_marginal_bias_forward[which(all_mu_samples$group=="SZ")]))
+temp_dev<-rowMeans(cbind(all_mu_samples$delta_marginal_bias_deviated[which(all_mu_samples$group=="HC")],
+                         all_mu_samples$delta_marginal_bias_deviated[which(all_mu_samples$group=="BD")],
+                         all_mu_samples$delta_marginal_bias_deviated[which(all_mu_samples$group=="SZ")]))
+
+output<-data.frame(head=c('forward','deviated'),
+                     hdi_lo=c(HDIofMCMC(temp_for)[1],HDIofMCMC(temp_dev)[1]),
+                     hdi_hi=c(HDIofMCMC(temp_for)[2],HDIofMCMC(temp_dev)[2]),
+                     mean=c(mean(temp_for),mean(temp_dev)))
+
+output %>%
+  kbl(caption = "Delta Bias by Head Orientation Marginalized Over Group",valign = "t",digits=3) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+ 
+# Correlations
+
+### Prep Data {.hidden .unlisted}
+
+Load and preprocess the clinical metrics. To retain as much data as possible, we winsorize the outermost .01 of data for variables with outliers. Because some of the clinical metrics (SAPS, SANS) are zero-inflated, we will run sensitivity analyses as a Post-Hoc to correlations so see if observed relationships hold when subjects with '0s' for those symptom dimensions are removed.
+
+```{r id12, echo=FALSE, fig.height=9, fig.show="hold", fig.width=9, message=FALSE, warning=FALSE, dpi=500, out.width='1500px'}
+
+# Prep data: Process Traditional Task Performance Metrics (Acc/RT), External Correlates (demographics, MSCEIT, BACS, SASSR, SAPS, SANS), and extract subject-level estimates from DDM Parameters, CPZ eq (for antipsychotic meds)
+
+###############################################################################
+# PART 1 - Process traditional gaze task metrics (Acc/RT)
+###############################################################################
+
+#process gaze task RT,  acc, and % yes summary values
+real_data<-read.csv("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/data/gaze_beh.csv")
+real_data$subjID<-match(real_data$subj, unique(real_data$subj)) #subj IDs to sequential indexes 
+
+groups<-unique(real_data$group)
+subjs<-unique(real_data$subj)
+
+acc_rt_summary<-data.frame(subj=subjs)
+
+## #overall acc and RT
+for (i in 1:length(subjs)){
+  tmpdata<-subset(real_data,real_data$subj==subjs[i])
+  tmp_summary<-data.frame(acc_all=mean(tmpdata$acc,na.rm=TRUE),
+                          rt_all=mean(tmpdata$rt,na.rm=TRUE),
+                          yes_all=length(which(tmpdata$choice == 1))/length(tmpdata$choice))
+  if(i==1){
+    running_summary<-tmp_summary
+  }else{
+    running_summary<-rbind(running_summary,tmp_summary)
+  }
+}
+
+acc_rt_summary<-cbind(acc_rt_summary,running_summary)
+
+#find forward head (cond_other_head=1), calculate acc, rt, yes for that
+find<-which(real_data$cond_other_head==1)
+tmp_real_data<-real_data[-find,]
+
+## #overall acc and RT
+for (i in 1:length(subjs)){
+  tmpdata<-subset(tmp_real_data,tmp_real_data$subj==subjs[i])
+  tmp_summary<-data.frame(acc_for=mean(tmpdata$acc,na.rm=TRUE),
+                          rt_for=mean(tmpdata$rt,na.rm=TRUE),
+                          yes_for=length(which(tmpdata$choice == 1))/length(tmpdata$choice))
+  if(i==1){
+    running_summary<-tmp_summary
+  }else{
+    running_summary<-rbind(running_summary,tmp_summary)
+  }
+}
+
+acc_rt_summary<-cbind(acc_rt_summary,running_summary)
+
+#find deviated head (cond_other_head=2), calculate acc, rt, yes for that
+find<-which(real_data$cond_other_head==2)
+tmp_real_data<-real_data[-find,]
+
+## #overall acc and RT
+for (i in 1:length(subjs)){
+  tmpdata<-subset(tmp_real_data,tmp_real_data$subj==subjs[i])
+  tmp_summary<-data.frame(acc_dev=mean(tmpdata$acc,na.rm=TRUE),
+                          rt_dev=mean(tmpdata$rt,na.rm=TRUE),
+                          yes_dev=length(which(tmpdata$choice == 1))/length(tmpdata$choice))
+  if(i==1){
+    running_summary<-tmp_summary
+  }else{
+    running_summary<-rbind(running_summary,tmp_summary)
+  }
+}
+
+acc_rt_summary<-cbind(acc_rt_summary,running_summary)
+
+write.csv(acc_rt_summary,file="/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/data/correlates/gaze_acc_rt_performance.csv",row.names = FALSE)
+
+###############################################################################
+# PART 2 - Process the external correlates (single observation for each subject)
+#
+# Measures:
+# Demographics: age, sex years of education
+# 
+# General Cognition = BACS
+# Emotion-Related Social Cogntion = MSCEIT
+# Real world social functioning = SASSR Social/Leisure Scale
+# Positive and Negative Symptoms = SAPS, SANS
+# Other clinical metrics: Meds (CPZeq), duration of illness
+#
+###############################################################################
+
+datadir<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/data/correlates/"
+setwd(datadir)
+
+#read in all .csv files
+files <- (Sys.glob("*.csv"))
+start<-data.frame(subj=subjs)
+rownames(start)<-start$subj
+
+for (i in 1:length(files)){
+  this_file<-data.frame(read.csv(files[i]))
+  num_cols<-dim(this_file)[2]
+  tmp_data<-merge(start, this_file,all.x=TRUE,by.x = names(start), by.y = "subj",no.dups = T)
+  
+  if(i==1){
+    all_correlates<-tmp_data
+  }else{
+    all_correlates<-cbind(all_correlates,tmp_data)
+  }
+}
+
+#get rid of extra subject columns
+tmp_col<-grep("subj", colnames(all_correlates),fixed = TRUE) 
+tmp_col<-tmp_col[-1]
+all_correlates<-all_correlates[,-tmp_col]
+
+# score real world functional data (SASSR). 
+
+## invert scores so higher scores = better functioning (for interpretation) (because raw data (scores range from 1 to 5 where 1 is better social functioning))
+all_correlates$SASSR_Social_Leisure<-(6-all_correlates$SASSR_Social_Leisure)
+
+# calculate illness duration
+all_correlates$clin_illness_duration<-all_correlates$age-all_correlates$clin_age_onset
+
+###############################################################################
+# PART 3 - Calculate CPZeq for patients on antipsychotic medications
+###############################################################################
+
+round1<-dplyr::select(all_correlates,c('subj','antipsychotic1','dose1','q1','route1'))
+find_na<-which(is.na(round1$antipsychotic1))
+round1<-round1[-find_na,]
+#check_ap(round1, ap_label = "antipsychotic1", route = "mixed", route_label = "route1", key=gardner2010)
+round1<-to_cpz(round1, ap_label = "antipsychotic1", dose_label = "dose1", route = "mixed", route_label = "route1", q_label = "q1", key=gardner2010) 
+round1<-dplyr::select(round1,c('subj','cpz_conv_factor','cpz_eq'))
+colnames(round1)<-c('subj','cpz_conv_factor1','cpz_eq1')
+all_correlates<-merge(all_correlates, round1,all.x=TRUE,by.x = "subj", by.y = "subj",no.dups = T)
+
+round2<-dplyr::select(all_correlates,c('subj','antipsychotic2','dose2','q2','route2'))
+find_na<-which(is.na(round2$antipsychotic2))
+round2<-round2[-find_na,]
+round2$q2<-as.numeric(round2$q2)
+#check_ap(round2, ap_label = "antipsychotic2", route = "mixed", route_label = "route2", key=gardner2010)
+round2<-to_cpz(round2, ap_label = "antipsychotic2", dose_label = "dose2", route = "mixed", route_label = "route2", q_label = "q2", key=gardner2010) 
+round2<-dplyr::select(round2,c('subj','cpz_conv_factor','cpz_eq'))
+colnames(round2)<-c('subj','cpz_conv_factor2','cpz_eq2')
+all_correlates<-merge(all_correlates, round2,all.x=TRUE,by.x = "subj", by.y = "subj",no.dups = T)
+
+#Note: SANS scored based on factor scores of Sayers, Curran, and Mueser, (1996): Diminished expression (EXP) and MAP (Social Amotivation factor). Items were multipled by factor weights for factors that they loaded significantly onto and then averaged across items within each factor. we did not include the inattention-alogia factor because the SANS inattention scale data was not collected (poor reliability)
+
+for (i in 1:dim(all_correlates)[1]){
+  if(is.na(all_correlates$meds_antipsychotic_user[i])){
+  }else{
+    if(all_correlates$meds_antipsychotic_user[i]==0){#if we know the person was not taking antipsychotics, change any NA CPZeq values to 0
+      if(is.na(all_correlates$cpz_eq1[i])){
+        all_correlates$cpz_eq1[i]<-0
+      }
+      if(is.na(all_correlates$cpz_eq2[i])){
+        all_correlates$cpz_eq2[i]<-0
+      }
+    }
+  }
+}
+
+all_correlates$meds_CPZeq_wHC<-rowSums(cbind(all_correlates$cpz_eq1,all_correlates$cpz_eq2),na.rm=T)
+all_correlates$meds_CPZeq_noHC<-rowSums(cbind(all_correlates$cpz_eq1,all_correlates$cpz_eq2),na.rm=T)
+
+for (i in 1:dim(all_correlates)[1]){
+  if(all_correlates$group_name[i]==1){ #if person is control, change CPZ to 0 for meds_CPZeq_wHC and change CPZ to NA for meds_CPZeq_noHC
+    all_correlates$meds_CPZeq_wHC[i]<-0
+    all_correlates$meds_CPZeq_noHC[i]<-NA
+  }else{
+    if(is.na(all_correlates$meds_antipsychotic_user[i])){ #if data on antipsychotic use not collected, mark CPZeq as NA
+      all_correlates$meds_CPZeq_wHC[i]<-NA
+      all_correlates$meds_CPZeq_noHC[i]<-NA
+    }else{
+      if(all_correlates$meds_has_antipsychotic_dose_data[i]==0){ #if antipsychotic names, but not doses were collected, mark CPZ as NA
+        all_correlates$meds_CPZeq_wHC[i]<-NA
+        all_correlates$meds_CPZeq_noHC[i]<-NA
+      }
+    }
+  }
+}
+
+write.csv(all_correlates,file="/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/data/all_correlates.csv",row.names = F)
+
+###############################################################################
+# PART 4 - Extract subject-level parameters from posterior samples of DDM
+###############################################################################
+
+#grab subject data 
+tmp_col<-grep("sub_", colnames(alldata),fixed = TRUE) 
+subdata<-alldata[,tmp_col] 
+
+# grab alpha data
+tmp_col<-grep("alpha", colnames(subdata),fixed = TRUE) 
+alpha_data<-colMeans(subdata[,tmp_col])
+
+#grab beta data
+tmp_col<-grep("beta", colnames(subdata),fixed = TRUE) 
+beta_data<-colMeans(subdata[,tmp_col])
+
+#grab ndt data
+tmp_col<-grep("ndt", colnames(subdata),fixed = TRUE) 
+ndt_data<-colMeans(subdata[,tmp_col])
+
+#grab delta present data
+tmp_col<-grep("delta_present", colnames(subdata),fixed = TRUE) 
+
+delta_present_forward_neutral_samples<-subdata[,tmp_col][1:100]
+delta_present_forward_fearful_samples<-subdata[,tmp_col][101:200]
+delta_present_deviated_neutral_samples<-subdata[,tmp_col][201:300]
+delta_present_deviated_fearful_samples<-subdata[,tmp_col][301:400]
+
+delta_present_forward_neutral_data<-colMeans(delta_present_forward_neutral_samples)
+delta_present_forward_fearful_data<-colMeans(delta_present_forward_fearful_samples)
+delta_present_deviated_neutral_data<-colMeans(delta_present_deviated_neutral_samples)
+delta_present_deviated_fearful_data<-colMeans(delta_present_deviated_fearful_samples)
+
+#grab delta absent data
+tmp_col<-grep("delta_absent", colnames(subdata),fixed = TRUE) 
+
+delta_absent_forward_neutral_samples<-subdata[,tmp_col][1:100]
+delta_absent_forward_fearful_samples<-subdata[,tmp_col][101:200]
+delta_absent_deviated_neutral_samples<-subdata[,tmp_col][201:300]
+delta_absent_deviated_fearful_samples<-subdata[,tmp_col][301:400]
+
+delta_absent_forward_neutral_data<-colMeans(delta_absent_forward_neutral_samples)
+delta_absent_forward_fearful_data<-colMeans(delta_absent_forward_fearful_samples)
+delta_absent_deviated_neutral_data<-colMeans(delta_absent_deviated_neutral_samples)
+delta_absent_deviated_fearful_data<-colMeans(delta_absent_deviated_fearful_samples)
+
+###########################################################################
+# PART 4a - calculate overall drift rate for forward and deviated heads
+###########################################################################
+
+##marginalize over emo conditions
+delta_marginal_present_forward_samples<-(delta_present_forward_neutral_samples+delta_present_forward_fearful_samples)/2
+delta_marginal_present_deviated_samples<-(delta_present_deviated_neutral_samples+delta_present_deviated_fearful_samples)/2
+
+delta_marginal_absent_forward_samples<-(delta_absent_forward_neutral_samples+delta_absent_forward_fearful_samples)/2
+delta_marginal_absent_deviated_samples<-(delta_absent_deviated_neutral_samples+delta_absent_deviated_fearful_samples)/2
+
+delta_marginal_present_forward_data<-colMeans(delta_marginal_present_forward_samples)
+delta_marginal_present_deviated_data<-colMeans(delta_marginal_present_deviated_samples)
+
+delta_marginal_absent_forward_data<-colMeans(delta_marginal_absent_forward_samples)
+delta_marginal_absent_deviated_data<-colMeans(delta_marginal_absent_deviated_samples)
+
+#Now marginalize over gaze direction
+
+#marginalize over gaze direction for FORWARD heads - need to invert the indirect gaze condition samples (ie multiply by -1 so higher=better for all)
+delta_marginal_forward_samples<-(delta_marginal_present_forward_samples+delta_marginal_absent_forward_samples*-1)/2
+
+#marginalize over gaze direction for DEVIATED heads - need to invert the indirect gaze condition samples (ie multiply by -1 so higher=better for all)
+delta_marginal_deviated_samples<-(delta_marginal_present_deviated_samples+delta_marginal_absent_deviated_samples*-1)/2
+
+delta_marginal_forward_data<-colMeans(delta_marginal_forward_samples)
+delta_marginal_deviated_data<-colMeans(delta_marginal_deviated_samples)
+
+#Finally, let's marginalize over forward and deviated head
+delta_marginal_samples<-(delta_marginal_forward_samples+delta_marginal_deviated_samples)/2
+delta_marginal_data<-colMeans(delta_marginal_samples)
+
+###########################################################################
+# PART 4b - calculate bias in drift rate (bias towards direct gaze)
+###########################################################################
+
+##marginalize over emo conditions
+delta_marginal_present_forward_samples<-(delta_present_forward_neutral_samples+delta_present_forward_fearful_samples)/2
+delta_marginal_present_deviated_samples<-(delta_present_deviated_neutral_samples+delta_present_deviated_fearful_samples)/2
+
+delta_marginal_absent_forward_samples<-(delta_absent_forward_neutral_samples+delta_absent_forward_fearful_samples)/2
+delta_marginal_absent_deviated_samples<-(delta_absent_deviated_neutral_samples+delta_absent_deviated_fearful_samples)/2
+
+#here, we do NOT invert the indirect gaze samples because we want to account for the bias in drift rates toward direct gaze
+
+#Now marginalize over gaze direction
+
+#marginalize over gaze direction for FORWARD heads
+delta_marginal_forward_samples<-(delta_marginal_present_forward_samples+delta_marginal_absent_forward_samples)/2
+
+#marginalize over gaze direction for DEVIATED heads
+delta_marginal_deviated_samples<-(delta_marginal_present_deviated_samples+delta_marginal_absent_deviated_samples)/2
+
+delta_bias_marginal_forward_data<-colMeans(delta_marginal_forward_samples)
+delta_bias_marginal_deviated_data<-colMeans(delta_marginal_deviated_samples)
+
+#Finally, let's marginalize over direct and indirect gaze -- to get drift bias -- and average over all samples.
+delta_bias_marginal_samples<-(delta_marginal_forward_samples+delta_marginal_deviated_samples)/2
+delta_bias_marginal_data<-colMeans(delta_bias_marginal_samples)
+
+###########################################################################
+# PART 4c - calculate discriminability from drift rate (between direct/indirect gaze)
+###########################################################################
+
+##marginalize over emo conditions
+delta_marginal_present_forward_samples<-(delta_present_forward_neutral_samples+delta_present_forward_fearful_samples)/2
+delta_marginal_present_deviated_samples<-(delta_present_deviated_neutral_samples+delta_present_deviated_fearful_samples)/2
+
+delta_marginal_absent_forward_samples<-(delta_absent_forward_neutral_samples+delta_absent_forward_fearful_samples)/2
+delta_marginal_absent_deviated_samples<-(delta_absent_deviated_neutral_samples+delta_absent_deviated_fearful_samples)/2
+
+#here, we do NOT invert the indirect gaze samples because we want to account for the distance between drift rates for direct/indirect gaze
+
+#Now marginalize over gaze direction
+
+#subtract over gaze direction for FORWARD heads
+delta_marginal_forward_samples<-delta_marginal_present_forward_samples-delta_marginal_absent_forward_samples
+
+#subtract over gaze direction for DEVIATED heads
+delta_marginal_deviated_samples<-delta_marginal_present_deviated_samples-delta_marginal_absent_deviated_samples
+
+delta_disc_marginal_forward_data<-colMeans(delta_marginal_forward_samples)
+delta_disc_marginal_deviated_data<-colMeans(delta_marginal_deviated_samples)
+
+#Finally, let's marginalize over forward and deviated heads to get overall measure of discriminability
+delta_disc_marginal_samples<-(delta_marginal_forward_samples+delta_marginal_deviated_samples)/2
+delta_disc_marginal_data<-colMeans(delta_disc_marginal_samples)
+
+############################################################################
+
+#get the group that each subj belongs to
+grp_data<-real_data %>% distinct(subj,.keep_all=TRUE)
+
+#combine the data
+all_sub_ddm_data<-data.frame(subj=unique(real_data$subj),
+                         group=grp_data$group,
+                         alpha=alpha_data,
+                         beta=beta_data,
+                         delta=delta_marginal_data,
+                         delta_bias=delta_bias_marginal_data,
+                         delta_disc=delta_disc_marginal_forward_data,
+                         delta_direct_forward_neutral=delta_present_forward_neutral_data,
+                         delta_direct_forward_fearful=delta_present_forward_fearful_data,
+                         delta_direct_deviated_neutral=delta_present_deviated_neutral_data,
+                         delta_direct_deviated_fearful=delta_present_deviated_fearful_data,
+                         delta_indirect_forward_neutral=delta_absent_forward_neutral_data*-1,
+                         delta_indirect_forward_fearful=delta_absent_forward_fearful_data*-1,
+                         delta_indirect_deviated_neutral=delta_absent_deviated_neutral_data*-1,
+                         delta_indirect_deviated_fearful=delta_absent_deviated_fearful_data*-1,
+                         delta_for=delta_marginal_forward_data,
+                         delta_dev=delta_marginal_deviated_data,
+                         delta_bias_for=delta_bias_marginal_forward_data,
+                         delta_bias_dev=delta_bias_marginal_deviated_data,
+                         delta_disc_for=delta_disc_marginal_forward_data,
+                         delta_disc_dev=delta_disc_marginal_deviated_data,
+                         delta_direct_for=delta_marginal_present_forward_data,
+                         delta_direct_dev=delta_marginal_present_deviated_data,
+                         delta_indirect_for=delta_marginal_absent_forward_data*-1,
+                         delta_indirect_dev=delta_marginal_absent_deviated_data*-1,
+                         ndt=ndt_data)
+
+#merge DDM param data and correlates based on matching subj ID's
+all_sub_data<-merge(all_sub_ddm_data, all_correlates,all.x=TRUE,by.x = "subj", by.y = "subj",no.dups = T)
+
+#save to final_fit directory
+filename<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/final_fit/sub_pars_w_correlates.RData"
+save(all_sub_data,file = filename)
+filename<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/final_fit/sub_pars_w_correlates.csv"
+write.csv(all_sub_data,file=filename,row.names=F)
+
+#############################################################################
+# Clear large variables and reload concise version of data
+#############################################################################
+
+rm(list=grep("*samples",ls(),value=TRUE,invert=FALSE))
+rm(list=grep("tmp_*",ls(),value=TRUE,invert=FALSE))
+
+invisible(gc())
+
+#load individual subj params combined with subj-level correlates
+all_sub_data<-read.csv("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/final_fit/sub_pars_w_correlates.csv")
+
+all_sub_data<-dplyr::select(all_sub_data,c('subj','alpha','beta','ndt',
+                                           'delta_for',
+                                           'delta_dev',
+                                           'delta_bias_for',
+                                           'delta_bias_dev',
+                                           'rt_all','acc_all','yes_all',
+                                           'rt_for','acc_for','yes_for',
+                                           'rt_dev','acc_dev','yes_dev',
+                                           'BACS','MSCEIT','group',
+                                           'clin_illness_duration','saps_Hallucination',
+                                           'saps_Delusion','diagnosis','asrm','bdi',
+                                           'sans_MAP','sans_EXP',
+                                           'SASSR_Social_Leisure',
+                                           'meds_antipsychotic_user',
+                                           'meds_antidepress_user','meds_mood_stab_user',
+                                           'meds_stimulant_user','meds_hypnotic_user',
+                                           'meds_anxiolytic_user','meds_anticholinergic_user',
+                                           'meds_CPZeq_wHC','meds_CPZeq_noHC',
+                                           'age','sex','edu','parent_edu','race'))
+
+#dummy code categorical variables
+race_dummy_code<-data.frame(dummy.code(all_sub_data$race))
+dx_dummy_code<-data.frame(dummy.code(all_sub_data$diagnosis))
+sex_dummy_code<-data.frame(dummy.code(all_sub_data$sex))
+all_sub_data<-cbind(all_sub_data,race_dummy_code,dx_dummy_code,sex_dummy_code)
+all_sub_data$group<-as.factor(all_sub_data$group)
+
+all_sub_data1<-all_sub_data #use all_sub_data1 to test later how many subjects this impacted
+
+# winsorize extreme acc and delta bias value (due to 1 subject P06 with extreme but valid data)
+all_sub_data$acc_all<-winsor(all_sub_data$acc_all,trim=.01)
+all_sub_data$rt_all<-winsor(all_sub_data$rt_all,trim=.01)
+all_sub_data$yes_all<-winsor(all_sub_data$yes_all,trim=.01)
+all_sub_data$delta_bias_for<-winsor(all_sub_data$delta_bias_for,trim=.01) #addresses one subject that had strong bias towards "looking at me" in SZ group
+all_sub_data$delta_bias_dev<-winsor(all_sub_data$delta_bias_dev,trim=.01) #addresses one subject that had strong bias towards "looking at me" in SZ group
+all_sub_data$delta_for<-winsor(all_sub_data$delta_for,trim=.01) #original dists are fine, but need to winsorize because this calculation indexes discriminability and one subject that had very biased responses had very low disriminability
+all_sub_data$delta_dev<-winsor(all_sub_data$delta_dev,trim=.01)#original dists are fine, but need to winsorize because this calculation indexes discriminability and one subject that had very biased responses had very low disriminability
+all_sub_data$meds_CPZeq_noHC<-winsor(all_sub_data$meds_CPZeq_noHC,trim=.01) 
+
+compare<-all_sub_data[,c(2:23,25:38)]-all_sub_data1[,c(2:23,25:38)]
+compare<-data.frame(colSums(compare != 0,na.rm = T))
+colnames(compare)<-c('n_winsorized')
+compare
+
+eval<-describe(all_sub_data,na.rm = TRUE)
+eval
+
+vars<-c("alpha","beta",
+        "delta_for","delta_dev",
+        "delta_bias_for","delta_bias_dev",
+        "ndt","acc_all",
+        "rt_all","yes_all","SASSR_Social_Leisure","BACS","MSCEIT",
+        "saps_Delusion","saps_Hallucination",
+        "sans_MAP","meds_CPZeq_noHC")
+
+for (i in 1:length(vars)){
+  tmpdata<-all_sub_data %>% dplyr::select("group"|vars[i])
+  colnames(tmpdata)<-c("group","var")
+  variable<-vars[i]
+
+  p1<-ggplot(tmpdata, aes(x=var)) + 
+    geom_histogram(color="#e9ecef", alpha=0.4, position = 'identity',bins=10)+
+    xlab(vars[i])+
+    theme_classic(base_size = 7)
+  p2<-ggqqplot(tmpdata$var)+xlab(vars[i])+theme_classic(base_size = 7)
+  
+  print(p1)
+  print(p2)
+}
+
+levels(all_sub_data$group)[levels(all_sub_data$group) == "1"] = "HC"
+levels(all_sub_data$group)[levels(all_sub_data$group) == "2"] = "BD"
+levels(all_sub_data$group)[levels(all_sub_data$group) == "3"] = "SZ"
+
+```
+ 
+```{r id14, echo=FALSE, fig.height=5, fig.show="hold", fig.width=5, message=FALSE, warning=FALSE, dpi=500, out.width='1500px'}
+#Demographics
+
+demo_table<-dplyr::select(all_sub_data,c('subj','group','age','F','edu','parent_edu',
+                                         'White','Black.or.African.American',
+                                         'Multiracial','American.Indian.or.Alaska.Native',
+                                         'Asian','Hispanic',
+                                         'clin_illness_duration',
+                                         'Schizophrenia','Schizoaffective','Bipolar.I',
+                                         'asrm','bdi',
+                                         'saps_Hallucination',
+                                         'saps_Delusion',
+                                         'sans_MAP','sans_EXP',
+                                         'meds_antipsychotic_user',
+                                         'meds_antidepress_user','meds_mood_stab_user',
+                                         'meds_stimulant_user','meds_hypnotic_user',
+                                         'meds_anxiolytic_user','meds_anticholinergic_user',
+                                         'meds_CPZeq_noHC',
+                                         'BACS','MSCEIT',
+                                         'rt_all','acc_all','yes_all','SASSR_Social_Leisure'))
+
+colnames(demo_table)<-c('Subj','Group','Age','Sex (% Female)','Education (Years)','Parental Education (Years)',
+                        'White (%)','Black or African American (%)','Multiracial (%)',
+                        'American Indian or Alaska Native (%)',
+                        'Asian (%)','Hispanic (%)',
+                        'Illness Duration',
+                        'Schizophrenia (%)','Schizoaffective (%)','Bipolar I (%)',
+                        'ASRM','BDI',
+                        'SAPS-Hallucination',
+                        'SAPS-Delusion',
+                        'SANS-Motivation',
+                        'SANS-Expressive',
+                        'Antipsychotic User (%)',
+                        'Antidepressant User (%)',
+                        'Mood Stabilizer User (%)',
+                        'Stimulant User (%)',
+                        'Hypnotic User (%)',
+                        'Anxiolytic User (%)',
+                        'Anticholinergic User (%)',
+                        'CPZeq',
+                        'Cognition-General: BACS',
+                        'Cognition-Social: MSCEIT',
+                        'Gaze Task: RT (ms)',
+                        'Gaze Task: Accuracy (%)',
+                        'Gaze Task: Yes Responses (%)',
+                        'Social Functioning: SAS-SR')
+
+demo_table_hc<-subset(demo_table,demo_table$Group=="HC")
+demo_table_bd<-subset(demo_table,demo_table$Group=="BD")
+demo_table_sz<-subset(demo_table,demo_table$Group=="SZ")
+
+demo_table_hc_sd<-apply((demo_table_hc[,3:ncol(demo_table_hc)]),2,sd,na.rm=T)
+demo_table_bd_sd<-apply((demo_table_bd[,3:ncol(demo_table_bd)]),2,sd,na.rm=T)
+demo_table_sz_sd<-apply((demo_table_sz[,3:ncol(demo_table_sz)]),2,sd,na.rm=T)
+
+demo_table_hc_n<-colSums(!is.na(demo_table_hc[,3:ncol(demo_table_hc)]))
+demo_table_bd_n<-colSums(!is.na(demo_table_bd[,3:ncol(demo_table_bd)]))
+demo_table_sz_n<-colSums(!is.na(demo_table_sz[,3:ncol(demo_table_sz)]))
+
+demo_table_hc<-colMeans(demo_table_hc[,3:ncol(demo_table_hc)],na.rm=T)
+demo_table_bd<-colMeans(demo_table_bd[,3:ncol(demo_table_bd)],na.rm=T)
+demo_table_sz<-colMeans(demo_table_sz[,3:ncol(demo_table_sz)],na.rm=T)
+
+demo_table_all<-data.frame(cbind(demo_table_hc,demo_table_hc_sd,demo_table_hc_n,
+                                 demo_table_bd,demo_table_bd_sd,demo_table_bd_n,
+                                 demo_table_sz,demo_table_sz_sd,demo_table_sz_n))
+
+colnames(demo_table_all)<-c("HC (M)","HC (SD)","HC (N)",
+                            "BD (M)","BD (SD)","BD (N)",
+                            "SZ (M)","SZ (SD)","HC (N)")
+
+demo_table_all<-round(demo_table_all,2)
+
+demo_table_all[demo_table_all=="NaN"]<-"--"
+demo_table_all[is.na(demo_table_all)]<-"--"
+
+demo_table_all %>%
+  kbl(caption = "Table 1. Sample Characteristics",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  pack_rows("Demographic", 1, 4) %>%
+  pack_rows("Race", 5, 10,hline_before = T,italic=T,bold=F) %>%
+  pack_rows("Clinical", 11, 20) %>%
+  pack_rows("Diagnosis", 12, 14,hline_before = T,italic=T,bold=F) %>%
+  pack_rows("Symptoms", 15, 20,hline_before = T,italic=T,bold=F) %>%
+  pack_rows("Medications", 21, 28,hline_before = T,italic=T,bold=F) %>%
+  pack_rows("General/Social Cognition", 29, 30) %>%
+  pack_rows("Gaze Task Performance", 31, 33) %>%
+  pack_rows("Social Functioning", 34, 34) %>%
+  kable_styling(full_width=T)
+
+```
+ 
+## Correlations*: DDM Parameters, Traditional Metrics, General/Social Cognition, Symptoms
+
+```{r id17, echo=FALSE, fig.height=12, fig.width=12, message=FALSE, warning=FALSE, dpi=500, out.width='1800px'}
+
+tmp_corr_data<-dplyr::select(all_sub_data,c('group',
+                                            'alpha','beta',
+                                            'delta_for','delta_dev',
+                                            'delta_bias_for','delta_bias_dev',
+                                            'acc_all','rt_all','yes_all',
+                                            'BACS','MSCEIT',
+                                            'saps_Delusion','saps_Hallucination','sans_MAP'))
+colnames(tmp_corr_data)<-c('group',
+              'alpha','beta',
+              'delta_for','delta_dev',
+              'delta_bias_for','delta_bias_dev',
+              'acc','rt','yes',
+              'BACS','MSCEIT',
+              'delusion','halluc','amotiv')
+
+tmp_corr_data$group<-as.factor(tmp_corr_data$group)
+
+p<-ggstatsplot::ggcorrmat(
+  data = tmp_corr_data[,2:ncol(tmp_corr_data)],matrix.type = "upper",
+  insig = NULL,pch = 4,type="pearson",p.adjust.method="none",alpha=1,sig.level=.05,
+  output = "plot",
+  ggcorrplot.args = list(lab_size = 5, pch.cex = 10,tl.cex=3))+
+  theme_classic(base_size = 12)+xlab("")+ylab("")+
+  scale_fill_viridis(discrete = F,option="viridis",begin=.1)
+
+p+theme(axis.text.x = element_text(size = 12, angle = 90))+ggtitle("DDM Parameters, BACS/MSCEIT, SAPS/SANS, and RT/Acc/Yes")
+
+#get the p-values
+p<-ggstatsplot::ggcorrmat(
+  data = tmp_corr_data[,2:ncol(tmp_corr_data)],matrix.type = "upper",
+  insig = NULL,pch = 4,type="pearson",p.adjust.method="none",alpha=1,sig.level=.05,
+  output = "correlations")
+
+p<-data.frame(Var1=p$parameter1,
+             Var2=p$parameter2,
+             R=round(p$estimate,3),
+             CI=paste("[",round(p$conf.low,2),", ",round(p$conf.high,2),"]",sep=""),
+             p=round(p$p.value,3),
+             N=p$n.obs)
+
+#get rid of comparisons we aren't interested in
+p<-p[-which(p$Var1=='BACS'|p$Var1=='MSCEIT'|p$Var1=='amotiv'|p$Var1=='halluc'|p$Var1=='delusion'|p$Var1=='yes'|p$Var1=='rt'|p$Var1=='acc'),]
+p<-p[which(p$Var2=='BACS'|p$Var2=='MSCEIT'|p$Var2=='amotiv'|p$Var2=='halluc'|p$Var2=='delusion'),]
+rownames(p)<-NULL
+
+p %>%
+  kbl(caption = "Pearson Correlations Between DDM Parameters, Traditional Metrics, General/Social Cognition, SANS/SAPS: P-values, CI's, R-values, and # Subjects for Comparisons of Interest",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+ 
+## Correlations^: Sensitivity Analyses for Outliers and Zero-Inflation
+
+Results of sensitivity analyses show that the correlation between hallucinations and delta bias for forward heads remains when outliers and subjects with hallucinations scores = 0 are removed. In fact, the correlation is strengthened somewhat. This suggests the correlation is not merely the result of influential cases. However, the correlation between hallcuinations and delta bias for deviated heads is not significant after removing outliers, suggesting this relationship was driven by extreme values. As such, we will only interpret the correlation between hallucinations and drift bias (forward faces). Results also show that the correlation between delusions and start point is stronger when potential outliers and delusions = '0' cases are removed, suggesting the relationship is not the by-product of influential observations.
+
+### Hallucinations/drift bias (forward, deviated) correlations after removing outliers
+
+```{r id171, echo=FALSE, fig.height=12, fig.width=12, message=FALSE, warning=FALSE, dpi=500, out.width='1800px'}
+
+orig<-cor.test(tmp_corr_data$halluc,tmp_corr_data$delta_bias_for, method="pearson",use="pairwise.complete.obs")
+tmp_corr_data1<-tmp_corr_data[-which(tmp_corr_data$delta_bias_for>1.1),]
+new<-cor.test(tmp_corr_data1$halluc,tmp_corr_data1$delta_bias_for, method="pearson",use="pairwise.complete.obs")
+
+output<-data.frame(correlation=rep("halluc*delta (forw)",2),
+           version=c("original","after removing outlier"),
+           R=c(round(orig$estimate,3),round(new$estimate,3)),
+           CI_lo=c(round(orig$conf.int[1],3),round(new$conf.int[1],3)),
+           CI_up=c(round(orig$conf.int[2],3),round(new$conf.int[2],3)),
+           df=c(orig$df,new$df,3),
+           p=c(round(orig$p.value,3),round(new$p.value,3)))
+output %>%
+  kbl(caption = "Pearson Correlation Between Hallucinations and Delta Bias (Forward Heads): Before and After Removing Outliers",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+
+```{r id172, echo=FALSE, fig.height=12, fig.width=12, message=FALSE, warning=FALSE, dpi=500, out.width='1800px'}
+
+orig<-cor.test(tmp_corr_data$halluc,tmp_corr_data$delta_bias_dev, method="pearson",use="pairwise.complete.obs")
+tmp_corr_data1<-tmp_corr_data[-which(tmp_corr_data$delta_bias_dev< -3),]
+new<-cor.test(tmp_corr_data1$halluc,tmp_corr_data1$delta_bias_dev, method="pearson",use="pairwise.complete.obs")
+
+output<-data.frame(correlation=rep("halluc*delta (dev)",2),
+           version=c("original","after removing outlier"),
+           R=c(round(orig$estimate,3),round(new$estimate,3)),
+           CI_lo=c(round(orig$conf.int[1],3),round(new$conf.int[1],3)),
+           CI_up=c(round(orig$conf.int[2],3),round(new$conf.int[2],3)),
+           df=c(orig$df,new$df,3),
+           p=c(round(orig$p.value,3),round(new$p.value,3)))
+
+output %>%
+  kbl(caption = "Pearson Correlation Between Hallucinations and Delta Bias (Deviated Heads): Before and After Removing Outliers",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+ 
+### Hallucinations/drift bias (forward) correlations after addressing zero-inflation for SAPS-Hallucination
+
+```{r id181, echo=FALSE, fig.height=12, fig.width=12, message=FALSE, warning=FALSE, dpi=500, out.width='1800px'}
+
+orig<-cor.test(tmp_corr_data$halluc,tmp_corr_data$delta_bias_for, method="pearson",use="pairwise.complete.obs")
+tmp_corr_data1<-tmp_corr_data[-which(tmp_corr_data$halluc==0),]
+new<-cor.test(tmp_corr_data1$halluc,tmp_corr_data1$delta_bias_for, method="pearson",use="pairwise.complete.obs")
+
+output<-data.frame(correlation=rep("halluc*delta (for)",2),
+           version=c("original","after removing 0 values"),
+           R=c(round(orig$estimate,3),round(new$estimate,3)),
+           CI_lo=c(round(orig$conf.int[1],3),round(new$conf.int[1],3)),
+           CI_up=c(round(orig$conf.int[2],3),round(new$conf.int[2],3)),
+           df=c(orig$df,new$df,3),
+           p=c(round(orig$p.value,3),round(new$p.value,3)))
+
+output %>%
+  kbl(caption = "Pearson Correlation Between Hallucinations and Delta Bias (Deviated Heads): Before and After Removing Subjects with Hallucination Scores = 0",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+
+### Delusions/start point correlation after removing outliers
+
+```{r id18, echo=FALSE, fig.height=12, fig.width=12, message=FALSE, warning=FALSE, dpi=500, out.width='1800px'}
+
+orig<-cor.test(tmp_corr_data$delusion,tmp_corr_data$beta, method="pearson")
+tmp_corr_data1<-tmp_corr_data[-which(tmp_corr_data$delusion>26),]
+new<-cor.test(tmp_corr_data1$delusion,tmp_corr_data1$beta, method="pearson")
+
+output<-data.frame(correlation=rep("delusion*beta",2),
+           version=c("original","after removing outliers"),
+           R=c(round(orig$estimate,3),round(new$estimate,3)),
+           CI_lo=c(round(orig$conf.int[1],3),round(new$conf.int[1],3)),
+           CI_up=c(round(orig$conf.int[2],3),round(new$conf.int[2],3)),
+           df=c(orig$df,new$df,3),
+           p=c(round(orig$p.value,3),round(new$p.value,3)))
+output %>%
+  kbl(caption = "Pearson Correlation Between Delusions and Start Point: Before and After Removing Outliers",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+
+### Delusions/start point correlation after addressing zero-inflation for SAPS-Delusion
+
+```{r id183, echo=FALSE, fig.height=12, fig.width=12, message=FALSE, warning=FALSE, dpi=500, out.width='1800px'}
+
+orig<-cor.test(tmp_corr_data$delusion,tmp_corr_data$beta, method="pearson")
+tmp_corr_data1<-tmp_corr_data[-which(tmp_corr_data$delusion==0),]
+new<-cor.test(tmp_corr_data1$delusion,tmp_corr_data1$beta, method="pearson")
+
+output<-data.frame(correlation=rep("delusion*beta",2),
+           version=c("original","after removing 0 values"),
+           R=c(round(orig$estimate,3),round(new$estimate,3)),
+           CI_lo=c(round(orig$conf.int[1],3),round(new$conf.int[1],3)),
+           CI_up=c(round(orig$conf.int[2],3),round(new$conf.int[2],3)),
+           df=c(orig$df,new$df,3),
+           p=c(round(orig$p.value,3),round(new$p.value,3)))
+output %>%
+  kbl(caption = "Pearson Correlation Between Delusions and Start Point: Before and After Removing Subjects with Delusion Scores = 0",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+
+## Correlations^: Post-Hoc Analysis - CPZeq and Performance Correlations
+
+Are antipsychotic doses (CPZeq) related to measures that tap processing speed? Including BACS, DDM parameters (incl NDT here as well), traditional RT measures of task performance? Use non-parametric stats due to skewed CPZ distribution.
+
+```{r id19, echo=FALSE, fig.height=9, fig.width=10, message=FALSE, warning=FALSE, dpi=500, out.width='1600px'}
+
+#check correlations with CPZ
+tmp_corr_data<-dplyr::select(all_sub_data,c('group',
+                                            'BACS','MSCEIT','meds_CPZeq_noHC',
+                                            'alpha','beta',
+                                            'delta_for','delta_dev',
+                                            'delta_bias_for','delta_bias_dev',
+                                            'acc_all','rt_all','yes_all'))
+
+colnames(tmp_corr_data)<-c('group','BACS','MSCEIT','CPZeq','alpha','beta','delta_for','delta_dev',
+                           'delta_bias_for','delta_bias_dev','acc','rt','yes')
+
+tmp_corr_data$group<-as.factor(tmp_corr_data$group)
+tmp_corr_data1<-filter(tmp_corr_data, group == "SZ")
+
+#need to do nonparametric correlations because the distribution of CPZeq is highly skewed.
+cor<-data.frame(cor.matrix(tmp_corr_data1[,2:ncol(tmp_corr_data1)], method = c("kendall-b"),
+           na.omit = FALSE, group = NULL, sig = T, alpha = 0.05,
+           tri = c("lower"),
+           p.adj = c("none"), continuity = TRUE,
+           as.na = NULL,
+           write = NULL, check = TRUE, output = F)[["result"]][["cor"]])
+
+cor<-cor[which(rownames(cor)=='CPZeq'),-which(colnames(cor)=='CPZeq')]
+
+pval<-data.frame(cor.matrix(tmp_corr_data1[,2:ncol(tmp_corr_data1)], method = c("kendall-b"),
+           na.omit = FALSE, group = NULL, sig = T, alpha = 0.05,
+           tri = c("lower"),
+           p.adj = c("none"), continuity = TRUE,
+           as.na = NULL,
+           write = NULL, check = TRUE, output = F)[["result"]][["p"]])
+pval<-pval[which(rownames(pval)=='CPZeq'),-which(colnames(pval)=='CPZeq')]
+
+output<-data.frame(Var1=rownames(cor),
+               Var2=colnames(cor),
+               Kendalls_Tau=as.numeric(t(cor)),
+               p=as.numeric(t(pval)),
+               row.names = NULL)
+
+output %>%
+  kbl(caption = "Kendall's Tau Correlations Between Antipsychotic Dose and Behavior",valign = "t",digits=3) %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+
+```
+ 
+## Correlations^: Post-Hoc Analysis - Within SZ Only
+
+```{r id191, echo=FALSE, fig.height=12, fig.width=12, message=FALSE, warning=FALSE, dpi=500, out.width='1800px'}
+
+tmp_corr_data<-dplyr::select(all_sub_data,c('group',
+                                            'alpha','beta',
+                                            'delta_for','delta_dev',
+                                            'delta_bias_for','delta_bias_dev',
+                                            'acc_all','rt_all','yes_all',
+                                            'BACS','MSCEIT'))
+colnames(tmp_corr_data)<-c('group',
+              'alpha','beta',
+              'delta_for','delta_dev',
+              'delta_bias_for','delta_bias_dev',
+              'acc','rt','yes',
+              'BACS','MSCEIT')
+
+tmp_corr_data$group<-as.factor(tmp_corr_data$group)
+tmp_corr_data<-subset(tmp_corr_data,tmp_corr_data$group=="SZ")
+
+p<-ggstatsplot::ggcorrmat(
+  data = tmp_corr_data[,2:ncol(tmp_corr_data)],matrix.type = "upper",
+  insig = NULL,pch = 4,type="pearson",p.adjust.method="none",alpha=1,sig.level=.05,
+  output = "plot",
+  ggcorrplot.args = list(lab_size = 5, pch.cex = 10,tl.cex=3))+
+  theme_classic(base_size = 12)+xlab("")+ylab("")+
+  scale_fill_viridis(discrete = F,option="viridis",begin=.1)
+
+p+theme(axis.text.x = element_text(size = 12, angle = 90))+ggtitle("DDM Parameters, BACS/MSCEIT, SAPS/SANS, and RT/Acc/Yes: Within SZ Only")
+
+#get the p-values
+p<-ggstatsplot::ggcorrmat(
+  data = tmp_corr_data[,2:ncol(tmp_corr_data)],matrix.type = "upper",
+  insig = NULL,pch = 4,type="pearson",p.adjust.method="none",alpha=1,sig.level=.05,
+  output = "correlations")
+
+p<-data.frame(Var1=p$parameter1,
+             Var2=p$parameter2,
+             R=round(p$estimate,3),
+             CI=paste("[",round(p$conf.low,2),", ",round(p$conf.high,2),"]",sep=""),
+             p=round(p$p.value,3),
+             N=p$n.obs)
+
+#get rid of comparisons we aren't interested in
+p<-p[-which(p$Var1=='BACS'|p$Var1=='MSCEIT'|p$Var1=='amotiv'|p$Var1=='halluc'|p$Var1=='delusion'|p$Var1=='yes'|p$Var1=='rt'|p$Var1=='acc'),]
+p<-p[which(p$Var2=='BACS'|p$Var2=='MSCEIT'|p$Var2=='amotiv'|p$Var2=='halluc'|p$Var2=='delusion'),]
+rownames(p)<-NULL
+
+p %>%
+  kbl(caption = "Pearson Correlations Between DDM Parameters, Traditional Metrics, General/Social Cognition, SANS/SAPS: P-values, CI's, R-values, and # Subjects for Comparisons of Interest (Within SZ Only)",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+
+# Regressions
+
+Run regressions to see whether DDM parameters and/or traditional performance metrics (acc, RT, %yes responses) can predict social functioning across SZ and HC, above and beyond diagnosis and common measures of general and social cognition. We enter predictors in order of strength of relation with outcome (SASSR-Social Functioning) and retain if it adds significantly to the model.
+
+### Regressions: Initial Correlations with Outcome Variable to Determine Order to Enter Predictors
+ 
+```{r id21, echo=FALSE, fig.height=9, fig.show="hold", fig.width=12, message=FALSE, warning=FALSE, dpi=500, out.width='1800px'}
+
+#############################################################################
+# Prep Data
+#############################################################################
+
+#dummy code group variables
+tmp_all_sub_data<-all_sub_data
+tmp<-data.frame(dummy.code(tmp_all_sub_data$group))
+colnames(tmp)<-c('dummy_bd','dummy_hc','dummy_sz')
+tmp_all_sub_data<-cbind(tmp_all_sub_data,tmp)
+
+tmp_corr_data<-dplyr::select(tmp_all_sub_data,c('group','dummy_sz',
+                                            'SASSR_Social_Leisure','BACS','MSCEIT',
+                                            'alpha','beta',
+                                            'delta_for','delta_dev',
+                                            'delta_bias_for','delta_bias_dev',
+                                            'acc_all','rt_all','yes_all','meds_CPZeq_wHC'))
+
+tmp_corr_data<-subset(tmp_corr_data,tmp_corr_data$group != "BD")
+tmp_corr_data<-tmp_corr_data[-which(is.na(tmp_corr_data$SASSR_Social_Leisure)),]
+
+#############################################################################
+# Initial Correlations
+#############################################################################
+
+# do initial, uncorrected correlations to get R values for regressions
+p<-ggstatsplot::ggcorrmat(
+  data = tmp_corr_data[,3:ncol(tmp_corr_data)],output="correlation",
+  pch = 4,type="pearson",p.adjust.method="none")
+
+p<-data.frame(Var1=p$parameter1,
+             Var2=p$parameter2,
+             R=round(p$estimate,3))
+
+output<-filter(p, Var1 == "SASSR_Social_Leisure")
+
+output %>%
+  kbl(caption = "Regression Preparation: Correlations Between Predictors and Outcome (Social Functioning)",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+ 
+## Regression*: Can DDM Parameters Predict Social Functioning?
+
+Yes, start point predicts social functioning above and beyond diagnosis, general cognition, and social cognition.
+
+```{r id22, echo=FALSE, fig.height=5, fig.show="hold", fig.width=5, message=FALSE, warning=FALSE}
+
+tmp_corr_data1<-na.omit(tmp_corr_data)
+
+#order to enter (based on strength of relationship with outcome): delta for, delta dev, delta bias dev, beta, alpha, delta bias for
+
+#predicting social functioning - control for group and general/social cognition.
+m0 <- lm(SASSR_Social_Leisure ~ dummy_sz+BACS+MSCEIT, data = tmp_corr_data1)
+
+#add delta-forward to model - remove because it donesnt contribute anything significant to model
+m1 <- lm(SASSR_Social_Leisure ~ dummy_sz+BACS+MSCEIT+delta_for, data = tmp_corr_data1)
+
+# #add delta-deviated to model - remove because it donesnt contribute anything significant to model
+m2 <- lm(SASSR_Social_Leisure ~ dummy_sz+BACS+MSCEIT+delta_dev, data = tmp_corr_data1)
+
+#add delta_bias_dev to model - remove because it doesnt contribute anything significant to model 
+m3 <- lm(SASSR_Social_Leisure ~ dummy_sz+BACS+MSCEIT+delta_bias_dev, data = tmp_corr_data1)
+
+# #add beta to model - retain because it contributes significantly to model
+m4 <- lm(SASSR_Social_Leisure ~ dummy_sz+BACS+MSCEIT+beta, data = tmp_corr_data1)
+
+# #add alpha to model - remove because it doesnt contribute anything significant to model
+m5 <- lm(SASSR_Social_Leisure ~ dummy_sz+BACS+MSCEIT+beta+alpha, data = tmp_corr_data1)
+
+# #add delta_bias_for to model - remove because it doesnt contribute anything significant to model
+m6 <- lm(SASSR_Social_Leisure ~ dummy_sz+BACS+MSCEIT+beta+delta_bias_for, data = tmp_corr_data1)
+
+output<-apaRegress(list(m0,m1,m2,m3,m4,m5,m6))
+output %>%
+  kbl(caption = "Regression Results: Predicting Social Functioning from DDM Parameters",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+
+## Regression^: Sensitivity Analysis Controlling for CPZeq
+
+Results are the same when we control for antipsychotic dose.
+
+```{r id23, echo=FALSE, fig.height=5, fig.show="hold", fig.width=5, message=FALSE, warning=FALSE}
+
+#predicting social functioning - control for group, meds, and general cognition. 
+m0 <- lm(SASSR_Social_Leisure ~ dummy_sz+meds_CPZeq_wHC+BACS+MSCEIT, data = tmp_corr_data1)
+
+#add delta-forward to model - remove because it donesnt contribute anything significant to model
+m1 <- lm(SASSR_Social_Leisure ~ dummy_sz+meds_CPZeq_wHC+BACS+MSCEIT+delta_for, data = tmp_corr_data1)
+
+#add delta-deviated to model - remove because it donesnt contribute anything significant to model
+m2 <- lm(SASSR_Social_Leisure ~ dummy_sz+meds_CPZeq_wHC+BACS+MSCEIT+delta_dev, data = tmp_corr_data1)
+
+#add delta_bias_dev to model - remove because it donesnt contribute anything significant to model
+m3 <- lm(SASSR_Social_Leisure ~ dummy_sz+meds_CPZeq_wHC+BACS+MSCEIT+delta_bias_dev, data = tmp_corr_data1)
+
+#add beta to model - retain because it contributes significantly to model
+m4 <- lm(SASSR_Social_Leisure ~ dummy_sz+meds_CPZeq_wHC+BACS+MSCEIT+beta, data = tmp_corr_data1)
+
+#add alpha to model - remove because it doesnt contribute anything significant to model
+m5 <- lm(SASSR_Social_Leisure ~ dummy_sz+meds_CPZeq_wHC+BACS+MSCEIT+beta+alpha, data = tmp_corr_data1)
+
+#add delta_bias_for to model - remove because it doesnt contribute anything significant to model
+m6 <- lm(SASSR_Social_Leisure ~ dummy_sz+meds_CPZeq_wHC+BACS+MSCEIT+beta+delta_bias_for, data = tmp_corr_data1)
+
+output<-apaRegress(list(m0,m1,m2,m3,m4,m5,m6))
+output %>%
+  kbl(caption = "Regression on Social Functioning Controlling for Antipsychotic Dose",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+
+## Regression^: Post-Hoc Analysis Within Group
+
+Results look similar in SZ. DDM beta still accounts for an additional 7.5% of variance above and beyond BACS and MSCEIT, but the model and predictor don't reach significance. This isn't surprising given the small sample size here. For HC, strongest predictor above and beyond bacs and msceit is delta_bias_dev (additional 12.2% of variance), but it is not significant.
+
+### Regression: Can DDM Parameters Predict Social Functioning? (SZ Only)
+
+```{r id25, echo=FALSE, fig.height=5, fig.show="hold", fig.width=5, message=FALSE, warning=FALSE}
+
+tmp_corr_data1<-na.omit(tmp_corr_data)
+tmp_corr_data1<-subset(tmp_corr_data1,tmp_corr_data1$dummy_sz == 1)
+
+#predicting social functioning - control for group and general cognition. Group is significant predictor, but BACS is not. Still, we retain BACS in the model to control for effects of general cognition.')
+m0 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT, data = tmp_corr_data1)
+
+#add delta-forward to model - remove because it donesnt contribute anything significant to model
+m1 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT+delta_for, data = tmp_corr_data1)
+
+#add delta-deviated to model - remove because it donesnt contribute anything significant to model
+m2 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT+delta_dev, data = tmp_corr_data1)
+
+#add delta_bias_dev to model - remove because it donesnt contribute anything significant to model
+m3 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT+delta_bias_dev, data = tmp_corr_data1)
+
+#add beta to model - retain because it contributes significantly to model
+m4 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT+beta, data = tmp_corr_data1)
+
+#add alpha to model - remove because it doesnt contribute anything significant to model
+m5 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT+alpha, data = tmp_corr_data1)
+
+#add delta_bias_for to model - remove because it doesnt contribute anything significant to model
+m6 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT+delta_bias_for, data = tmp_corr_data1)
+
+output<-apaRegress(list(m0,m1,m2,m3,m4,m5,m6))
+output %>%
+  kbl(caption = "Regression on Social Functioning: Within SZ Only",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+ 
+### Regression: Can DDM Parameters Predict Social Functioning? (HC Only)
+
+```{r id26, echo=FALSE, fig.height=5, fig.show="hold", fig.width=5, message=FALSE, warning=FALSE}
+
+tmp_corr_data1<-na.omit(tmp_corr_data)
+tmp_corr_data1<-subset(tmp_corr_data1,tmp_corr_data1$dummy_sz == 0)
+
+#predicting social functioning - control for group and general cognition. Group is significant predictor, but BACS is not. Still, we retain BACS in the model to control for effects of general cognition.')
+m0 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT, data = tmp_corr_data1)
+
+#add delta-forward to model - remove because it donesnt contribute anything significant to model
+m1 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT+delta_for, data = tmp_corr_data1)
+
+#add delta-deviated to model - remove because it donesnt contribute anything significant to model
+m2 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT+delta_dev, data = tmp_corr_data1)
+
+#add delta_bias_dev to model - remove because it donesnt contribute anything significant to model
+m3 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT+delta_bias_dev, data = tmp_corr_data1)
+
+#add beta to model - retain because it contributes significantly to model
+m4 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT+beta, data = tmp_corr_data1)
+
+#add alpha to model - remove because it doesnt contribute anything significant to model
+m5 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT+alpha, data = tmp_corr_data1)
+
+#add delta_bias_for to model - remove because it doesnt contribute anything significant to model
+m6 <- lm(SASSR_Social_Leisure ~ BACS+MSCEIT+delta_bias_for, data = tmp_corr_data1)
+
+output<-apaRegress(list(m0,m1,m2,m3,m4,m5,m6))
+output %>%
+  kbl(caption = "\nRegression on Social Functioning: Within HC Only",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+ 
+## Regression^: Post-Hoc Analysis - Can Traditional Metrics Also Predict Social Functioning?
+
+None of the traditional metrics can predict social functioning above and beyond diagnosis, BACS, and MSCEIT.
+
+```{r id221, echo=FALSE, fig.height=5, fig.show="hold", fig.width=5, message=FALSE, warning=FALSE}
+
+#order to enter (based on strength of relationship with outcome) = acc, yes, rt
+
+tmp_corr_data1<-na.omit(tmp_corr_data)
+
+#predicting social functioning - control for group and general/social cognition.
+m0 <- lm(SASSR_Social_Leisure ~ dummy_sz+BACS+MSCEIT, data = tmp_corr_data1)
+
+##acc doesnt add anything so we remove it
+m7 <- lm(SASSR_Social_Leisure ~ dummy_sz+BACS+MSCEIT+acc_all, data = tmp_corr_data1)
+
+# %yes responses doesnt add anything so we remove it
+m8 <- lm(SASSR_Social_Leisure ~ dummy_sz+BACS+MSCEIT+yes_all, data = tmp_corr_data1)
+
+##rt doesnt add anything so we remove it
+m9 <- lm(SASSR_Social_Leisure ~ dummy_sz+BACS+MSCEIT+rt_all, data = tmp_corr_data1)
+
+output<-apaRegress(list(m0,m7,m8,m9))
+
+output %>%
+  kbl(caption = "Regression Results (Supplement): Predicting Social Functioning from Traditional Metrics",valign = "t") %>%
+  kable_classic(full_width=F, html_font = "Cambria") %>%
+  kable_styling(full_width=T)
+
+```
+ 
+```{r id24, eval=FALSE, fig.height=6, fig.show="hold", fig.width=5, message=FALSE, warning=FALSE, include=FALSE}
+
+# Evaluate model assumptions are met (they are!)
+
+#rerun winning model
+summary(m4 <- lm(SASSR_Social_Leisure ~ dummy_sz+BACS+MSCEIT+beta, data = tmp_corr_data1))
+
+tmp_corr_data1$res <- resid(m4)
+tmp_corr_data1$standres <- rstandard(m4)
+
+### Check if any standardized outliers greater than +/- 3
+tmp_corr_data1$outlier <- tmp_corr_data1$standres > 3 | tmp_corr_data1$standres < -3 #| means "OR"
+sum(tmp_corr_data1$outlier)
+
+## Check Influential Cases - Use Cook's distance
+tmp_corr_data1$cook <- cooks.distance(m4)
+### Check if any Cook's Distance greater than 1
+tmp_corr_data1$influence <- tmp_corr_data1$cook >= 1
+sum(tmp_corr_data1$influence)
+
+### Normality
+hist(tmp_corr_data1$standres) #histogram of standardized residuals
+
+### Homoscedasticity
+
+tmp_corr_data1$pred <- predict(m4) #get model predicted values
+tmp_corr_data1$standpred <- scale(tmp_corr_data1$pred, center = TRUE, scale = TRUE) #standardize them
+
+plot(tmp_corr_data1$res, tmp_corr_data1$pred) #plot unstandardized predicted values and residuals
+plot(tmp_corr_data1$standres, tmp_corr_data1$standpred) #plot standardized predicted values and residuals
+
+```
+ 

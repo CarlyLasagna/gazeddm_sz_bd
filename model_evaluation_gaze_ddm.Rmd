@@ -1,0 +1,3130 @@
+---
+title: 'Supplement 1: Model Specification and Evaluation for Lasagna et al. 2024'
+subtitle: '"Cognitive Mechanisms of Self-Referential Social Perception in Psychosis and Bipolar Disorder: Insights from Computational Modeling"'
+author: "Carly A. Lasagna, Ivy F. Tso, Scott D. Blain, Timothy J. Pleskac"
+output:
+  html_document:
+    toc: yes
+    number_sections: yes
+    fig_width: 4
+    fig_height: 4
+    df_print: paged
+    toc_depth: 1
+  pdf_document:
+    toc: yes
+    toc_depth: '1'
+    number_sections: yes
+    latex_engine: lualatex
+geometry: margin=2cm
+classoption: 9pt
+header-includes:
+  - \usepackage{amsmath}
+---
+\newpage
+
+# Code availability 
+ 
+__Code used to perform analyses is available on OSF and GitHub:__
+
+* OSF [(https://osf.io/x5n93/?view_only=c5e6d4bf6fbe48bebe9e28d6938b9246)](https://osf.io/x5n93/?view_only=c5e6d4bf6fbe48bebe9e28d6938b9246)
+* GitHub [(https://github.com/CarlyLasagna/gazeddm_sz_bd)](https://github.com/CarlyLasagna/gazeddm_sz_bd).
+
+__Coding key for groups, task conditions, and task responses:__
+
+*Diagnostic groups:* 1=HC, 2=BD, 3=SZ
+
+*DDM parameters:* alpha=threshold separation, beta=start point, ndt=non-decision time, delta=drift rate, delta bias=drift bias
+
+*Task stimuli:* 
+
+* gaze direction: 1=direct, 2=indirect 
+* head orientation: 1=forward, 2=deviated 
+* emotion: 1=neutral, 2=fearful 
+* emo*head: 1=neutral-forward, 2=fearful-forward, 3=neutral-deviated, 4=fearful-deviated
+
+*Task responses:* 
+
+* resp: 1=yes (looking at me), 2=no (not looking at me)
+* acc: 0=incorrect, 1=correct
+
+<br>
+ 
+```{r id1, echo=FALSE, message=FALSE, warning=FALSE, out.width='1500px'}
+
+# Setup: load packages and custom functions
+
+rm(list=ls()) #clear environment
+cat("\f") #clear console
+set.seed(42) #clear previous seed
+
+options(width = 10000)
+options(max.print=10000)
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(rstan)
+library(ggplot2)
+library(tidyr)
+library(plyr)
+library(dplyr)
+library(formatR)
+library(loo)
+library(bayesplot)
+library(shredder)
+library(RWiener)
+library(hrbrthemes)
+library(viridis)
+library(ggridges)
+library(HDInterval)
+library(boot)
+library(pkgcond)
+library(cmdstanr)
+library(posterior)
+library(data.table)
+library(parallel)
+library(doParallel)
+library(foreach)
+library(psych)
+library(kableExtra)
+
+#from HBayesDM toolbox  (Ahn et al 2014)
+HDIofMCMC <- function(sampleVec,credMass = 0.9) {
+  sortedPts = sort(sampleVec)
+  ciIdxInc = floor(credMass * length(sortedPts))
+  nCIs = length(sortedPts) - ciIdxInc
+  ciWidth = rep(0 , nCIs)
+  for (i in 1:nCIs) {
+    ciWidth[i] = sortedPts[i + ciIdxInc] - sortedPts[i]
+  }
+  HDImin = sortedPts[which.min(ciWidth)]
+  HDImax = sortedPts[which.min(ciWidth) + ciIdxInc]
+  HDIlim = c(HDImin , HDImax)
+  return(HDIlim)
+}
+
+plotHDI_noOutput <- function(sample   = NULL,
+                             credMass = 0.95,
+                             Title    = NULL,
+                             xLab     = "Value",
+                             yLab     = "Density",
+                             fontSize = NULL,
+                             binSize  = 30,
+                             ...) {
+  
+  # To pass R CMD Checks (serves no other purpose than to create binding)
+  ..density.. <- NULL
+  
+  HDI <- HDIofMCMC(as.vector(t(sample)), credMass = credMass)  # 'sample' w/ data.frame class is also fine..
+  sample_df <- data.frame(sample)
+  
+  h1 <- ggplot(sample_df, aes(x = sample)) +
+    ggplot2::theme_bw() +
+    geom_histogram(aes(y = ..density..), colour = "black", fill = "grey", bins = binSize, ...) +
+    ggtitle(Title) + xlab(xLab) + ylab(yLab) +
+    geom_segment(aes(x = HDI[1], y = 0, xend = HDI[2], yend = 0), size = 1.5, colour = "red") +
+    theme(axis.text.x = ggplot2::element_text(size = fontSize)) +
+    theme(axis.text.y = ggplot2::element_text(size = fontSize)) +
+    theme(axis.title.y = ggplot2::element_text(size = fontSize)) +
+    theme(axis.title.x = ggplot2::element_text(size = fontSize)) +
+    theme(plot.title = ggplot2::element_text(size = fontSize))
+  
+  return(h1)
+}
+
+```
+ 
+# Defining and Refining the Model Space
+
+The steps below detail the full process of defining and refining the full model space explored in the current study. After completing these steps, we were left with 8 models that underwent more comprehensive testing: 1,2,5,6,7,8,9, and 10. Full specification of these models is provided in the next section.
+
+```{r id2, echo=FALSE, message=FALSE, warning=FALSE}
+
+model_space<-read.csv("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/beh_manuscript/figures_tables/define_model_space.csv",header=T)
+
+model_space$Step<-""
+model_space$Model.Class<-""
+
+get_col<-which(colnames(model_space)=="Model.Class")
+model_space<-model_space[,-get_col]
+
+colnames(model_space)<-c("Step / Model Type","Model","Tested","Rationale","Pars Varying by GAZE","Pars Varying by HEAD","Pars Varying by EMO")
+
+model_space %>%
+  kbl(caption = "Defining Model Space",valign = "t") %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  pack_rows("Step 1: Define baseline model", 1, 1) %>%
+  pack_rows("Step 2: Define model space for models in which 1 single parameter varies by one or several task conditions", 2,22) %>%
+  pack_rows("Step 3: For plausible models defined in step 1 above, build upon those models by letting one additional parameter vary by task conditions. Begin with simplest of those models (model2)", 23, 28) %>%
+  pack_rows("Step 4: At this point, initial model comparisons for previous models made 2 things clear: 1) the models ran into difficulties when bias parameters were allowed to vary by emotion condition (model 7 and 8 had high pareto K values for LOO approx); AND 2) there was a considerably better fit when delta was allowed to vary by gaze direction AND head orientation (model 9 and 10 vs all other models). Considering this, the only additional models that made sense to consider building upon were model 9 and model 10. This meant that two additional, more complex models were considered but not ultimately tested for the reasons specified below", 29, 30)  %>%
+  pack_rows("Baseline", 1, 1,hline_before = T,italic=T) %>%
+  pack_rows("Delta Vary Only", 2, 8,hline_before = T,italic=T) %>%
+  pack_rows("Alpha Vary Only", 9, 15,hline_before = T,italic=T) %>%
+  pack_rows("Beta Vary Only", 16, 22,hline_before = T,italic=T) %>%
+  pack_rows("Building Upon Model 2", 23, 28,hline_before = T,italic=T) %>%
+  pack_rows("Building Upon Model 9", 29, 29,hline_before = T,italic=T) %>%
+  pack_rows("Building Upon Model 10", 30, 30,hline_before = T,italic=T) %>%
+  kable_styling(full_width=T)
+
+```
+ 
+# Model Specification 
+
+After refining the model space in the previous step, we were left with 8 models that underwent more comprehensive testing: 1,2,5,6,7,8,9, and 10. Full graphical specification of these remaining models is provided below.
+
+## Model 1
+
+Group and subject effects for delta, alpha, beta, ndt.
+
+```{r id3, echo=FALSE, message=FALSE, warning=FALSE, out.width='100%'}
+knitr::include_graphics('/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/beh_manuscript/figures_tables/plots/m1.jpg')
+```
+ 
+## Model 2
+
+Group and subject effects for delta, alpha, beta, ndt. Gaze condition effect for delta.
+
+```{r id4, echo=FALSE, message=FALSE, warning=FALSE, out.width='100%'}
+knitr::include_graphics('/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/beh_manuscript/figures_tables/plots/m2.jpg')
+```
+ 
+## Model 5
+
+Group and subject effects for delta, alpha, beta, ndt. Gaze and emotion condition effect for delta.
+
+```{r id5, echo=FALSE, message=FALSE, warning=FALSE, out.width='100%'}
+knitr::include_graphics('/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/beh_manuscript/figures_tables/plots/m5.jpg')
+```
+
+## Model 6
+
+Group and subject effects for delta, alpha, beta, ndt. Gaze and emotion condition effect for delta. Emotion condition effect for beta.
+
+```{r id6, echo=FALSE, message=FALSE, warning=FALSE, out.width='100%'}
+knitr::include_graphics('/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/beh_manuscript/figures_tables/plots/m6.jpg')
+```
+
+## Model 7
+
+Group and subject effects for delta, alpha, beta, ndt. Gaze and emotion condition effect for delta. Emotion condition effect for alpha.
+
+```{r id7, echo=FALSE, message=FALSE, warning=FALSE, out.width='100%'}
+knitr::include_graphics('/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/beh_manuscript/figures_tables/plots/m7.jpg')
+```
+
+## Model 8
+
+Group and subject effects for delta, alpha, beta, ndt. Gaze and emotion condition effect for delta. Emotion condition effect for alpha and beta.
+
+```{r id8, echo=FALSE, message=FALSE, warning=FALSE, out.width='100%'}
+knitr::include_graphics('/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/beh_manuscript/figures_tables/plots/m8.jpg')
+```
+
+## Model 9
+
+Group and subject effects for delta, alpha, beta, ndt. Gaze and head condition effect for delta.
+
+```{r id12334432323, echo=FALSE, message=FALSE, warning=FALSE, out.width='100%'}
+knitr::include_graphics('/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/beh_manuscript/figures_tables/plots/m9.jpg')
+```
+
+## Model 10
+
+Group and subject effects for delta, alpha, beta, ndt. Gaze, emotion, and head condition effect for delta.
+
+```{r id9, echo=FALSE, message=FALSE, warning=FALSE, out.width='100%'}
+knitr::include_graphics('/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/beh_manuscript/figures_tables/plots/m10.jpg')
+```
+ 
+# Parameter Recovery 
+
+Performed for Model 1 only. Note: NDT fixed at 0.2 for initial parameter recovery analyses.
+
+```{r id10, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Code below calls summary data for fitted parameter recovery simulations that were run using separate 'parameter_recovery.R' script.
+
+# PREP DATA
+
+#set MODEL parameters for simulations
+h=.01             #time interval (in seconds)
+seconds=5         #max time (in seconds) for a response
+sigma=1           #diffusion coefficient
+
+#parameters in transformed space
+alpha=c(2)
+beta=c(.5) 
+delta=c(-.5)
+ndt=c(.2) 
+rtBound=0 #lowest rt allowed
+
+#starting values
+alphainits=alpha
+betainits=beta
+deltainits=delta
+ndtinits=ndt #ndt fixed for this
+
+# untransformed sigma
+sigdelta=.1 
+sigalpha=.1 
+sigbeta=.1 
+#signdt<-.02 #ndt fixed for this
+
+# back transform to standard space
+rawalpha=qnorm((alpha-.1)/3.9)
+rawdelta=qnorm((delta+4)/8)
+rawbeta=qnorm(beta)
+
+# set SIMULATION parameters
+numsims <- 50 #number of simulations 
+numsubjs <- 25 # subjects 
+trials <- 512 # trials
+seed <- 42 #random seed 
+plots = FALSE
+
+#set TASK parameters
+n_cond <- 1 #number of task conditions 
+n_choice <- 2 #number of choice alternatives
+n_groups<-3 #number of diagnostic groups
+
+#set MCMC SAMPLER parameters
+warmup=1000 #number of burn in samples
+cores=4 #number of cores to use (default=1)
+iter=2000 #total number of samples (total # postwarmup draws = (iter-warmup)*chains)
+chains=4 #number of mcmc chains
+
+simpath<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/param_recovery/output/"
+
+#load data
+file<-paste(simpath,'simmcmc_all.csv',sep="")
+allmcmc<-read.csv(file,header=T)
+
+file<-paste(simpath,'sub_summary.csv',sep="")
+sub_summary<-read.csv(file,header = T)
+
+file<-paste(simpath,'sim_summary.csv',sep="")
+sim_summary<-read.csv(file,header = T)
+
+sims<-max(sub_summary$sim)
+numsubjs<-max(sub_summary$subj)
+allmcmc$sim<-as.factor(allmcmc$sim)
+sub_summary$sim<-as.factor(sub_summary$sim)
+sim_summary$sim<-as.factor(sim_summary$sim)
+
+# define which subjects recovered generating vals
+sub_summary$recover_alpha<-as.numeric(sub_summary$genalpha>sub_summary$fitalpha_hdilo & sub_summary$genalpha<sub_summary$fitalpha_hdihi)
+sub_summary$recover_alpha<-as.factor(sub_summary$recover_alpha)
+sub_summary$recover_beta<-as.numeric(sub_summary$genbeta>sub_summary$fitbeta_hdilo & sub_summary$genbeta<sub_summary$fitbeta_hdihi)
+sub_summary$recover_beta<-as.factor(sub_summary$recover_beta)
+sub_summary$recover_delta<-as.numeric(sub_summary$gendelta>sub_summary$fitdelta_hdilo & sub_summary$gendelta<sub_summary$fitdelta_hdihi)
+sub_summary$recover_delta<-as.factor(sub_summary$recover_delta)
+
+# define which simulations recovered group level generating vals
+sim_summary$recover_alpha<-as.numeric(sim_summary$gen_alpha>sim_summary$alpha_hdi_lo & sim_summary$gen_alpha<sim_summary$alpha_hdi_hi)
+sim_summary$recover_alpha<-as.numeric(sim_summary$recover_alpha)
+sim_summary$recover_beta<-as.numeric(sim_summary$gen_beta>sim_summary$beta_hdi_lo & sim_summary$gen_beta<sim_summary$beta_hdi_hi)
+sim_summary$recover_beta<-as.numeric(sim_summary$recover_beta)
+sim_summary$recover_delta<-as.integer(sim_summary$gen_delta>sim_summary$delta_hdi_lo & sim_summary$gen_delta<sim_summary$delta_hdi_hi)
+sim_summary$recover_delta<-as.numeric(sim_summary$recover_delta)
+sim_summary$recover_ndt<-as.numeric(sim_summary$gen_ndt>sim_summary$ndt_hdi_lo & sim_summary$gen_ndt<sim_summary$ndt_hdi_hi)
+sim_summary$recover_ndt<-as.numeric(sim_summary$recover_ndt)
+
+```
+
+## Group-Level Parameters
+
+### Averaged over 50 simulations
+
+```{r id11, echo=FALSE, message=FALSE, warning=FALSE,fig.show="hold",}
+
+#ALPHA
+ggplot(allmcmc, aes(x=mu_alpha)) +
+  geom_density(alpha=0.1)+
+  labs(title="Alpha (Averaged over 50 simulations)") +
+  geom_vline(xintercept = alpha[1],size=.5)+
+  theme_bw()+
+  xlab("Parameter Value")+
+  ylab("Density")
+
+plotHDI_noOutput(allmcmc$mu_alpha, credMass = .95,Title = "alpha") + 
+  geom_vline(xintercept=alpha[1],colour="blue",size=1)
+
+#BETA
+ggplot(allmcmc, aes(x=mu_beta)) +
+  geom_density(alpha=0.1)+
+  labs(title="Beta (Averaged over 50 simulations)") +
+  geom_vline(xintercept = beta[1],size=.5)+
+  theme_bw()+
+  xlab("Parameter Value")+
+  ylab("Density")
+
+plotHDI_noOutput(allmcmc$mu_beta, credMass = .95,Title = "beta") +
+  geom_vline(xintercept=beta[1],colour="blue",size=1)
+
+#DELTA
+ggplot(allmcmc, aes(x=mu_delta)) +
+  geom_density(alpha=0.1)+
+  labs(title="Delta (Averaged over 50 simulations)") +
+  geom_vline(xintercept = delta[1],size=.5)+
+  theme_bw()+
+  xlab("Parameter Value")+
+  ylab("Density")
+
+plotHDI_noOutput(allmcmc$mu_delta, credMass = .95,Title = "delta") +
+  geom_vline(xintercept=delta[1],colour="blue",size=1)
+
+```
+
+### Separate for each simulation 
+
+```{r id12, echo=FALSE, fig.height=7, fig.width=2, message=FALSE, warning=FALSE,fig.show="hold",}
+
+numsims<-max(as.numeric(allmcmc$sim))
+
+for (i in 1:numsims){ #fill in which simulations recovered group parameters in long form 'allmcmc' data
+  summary_row<-which(sim_summary$sim==i,arr.ind = TRUE)
+  mcmc_row<-which(allmcmc$sim == i, arr.ind=TRUE) #get all rows in all mcmc for current simulation #
+  allmcmc$recover_alpha[mcmc_row]<-sim_summary$recover_alpha[summary_row]
+  allmcmc$recover_beta[mcmc_row]<-sim_summary$recover_beta[summary_row]
+  allmcmc$recover_delta[mcmc_row]<-sim_summary$recover_delta[summary_row]
+  allmcmc$recover_ndt[mcmc_row]<-sim_summary$recover_ndt[summary_row]
+}
+
+allmcmc$recover_alpha_f<-as.factor(allmcmc$recover_alpha)
+allmcmc$recover_beta_f<-as.factor(allmcmc$recover_beta)
+allmcmc$recover_delta_f<-as.factor(allmcmc$recover_delta)
+allmcmc$recover_ndt_f<-as.factor(allmcmc$recover_ndt)
+
+theCaption<-paste("Recovered in ", (sum(as.numeric(sim_summary$recover_alpha))/length(sim_summary$recover_alpha)*100),"% of simulations\n",sep="")
+ggplot(allmcmc, aes(x = mu_alpha, y = sim,color=recover_alpha_f,fill=recover_alpha_f)) +
+  geom_density_ridges(scale = 3, rel_min_height = 0.001,alpha = 0.3)+ 
+  theme_bw()+labs(caption = theCaption)+
+  geom_vline(xintercept=alpha[1],size=.4)+theme(legend.position="none")+
+  ylab("Simulation Number")+scale_color_manual(values = c("1"="#66a182","0" = "#d1495b"))
+
+theCaption<-paste("Recovered in ", (sum(as.numeric(sim_summary$recover_beta))/length(sim_summary$recover_beta)*100),"% of simulations\n",sep="")
+ggplot(allmcmc, aes(x = mu_beta, y = sim,color=recover_beta_f,fill=recover_beta_f)) +
+  geom_density_ridges(scale = 3, rel_min_height = 0.001,alpha = 0.3)+ 
+  theme_bw()+labs(caption = theCaption)+
+  geom_vline(xintercept=beta[1],size=.4)+theme(legend.position="none")+
+  ylab("Simulation Number")+scale_color_manual(values = c("1"="#66a182","0" = "#d1495b"))
+
+theCaption<-paste("Recovered in ", (sum(as.numeric(sim_summary$recover_delta))/length(sim_summary$recover_delta)*100),"% of simulations\n",sep="")
+ggplot(allmcmc, aes(x = mu_delta, y = sim, color=recover_delta_f,fill=recover_delta_f)) +
+  geom_density_ridges(scale = 3, rel_min_height = 0.001,alpha = 0.3)+ 
+  theme_bw()+labs(caption = theCaption)+
+  geom_vline(xintercept=delta[1],size=.4)+theme(legend.position="none")+
+  ylab("Simulation Number")+scale_color_manual(values = c("1"="#66a182","0" = "#d1495b"))
+
+```
+ 
+## Subject-Level Parameters
+ 
+```{r id13, echo=FALSE, message=FALSE, warning=FALSE, tidy=TRUE,fig.show="hold",}
+
+#ALPHA
+theCaption<-paste("Recovered subject-level alpha generating values for ", (sum(as.numeric(sub_summary$recover_alpha)-1)/length(sub_summary$recover_alpha)*100),"% of subjects\n",sep="")
+ggplot(data=sub_summary,aes(x=genalpha,y=fitalpha,colour=recover_alpha))+
+  geom_point(alpha=.2)+
+  geom_errorbar(aes(ymin=fitalpha_hdilo,ymax=fitalpha_hdihi),alpha=.2)+
+  geom_abline(intercept=0,slope=1)+
+  coord_cartesian(xlim = c(1.4,2.6),ylim = c(1.4, 2.6))+theme_bw()+
+  labs(caption=theCaption,title = "Alpha - Subject-Level Parameter Recovery")+
+  scale_color_manual(values = c("1"="#66a182","0" = "#d1495b"))+theme(legend.position="none")+  
+  xlab("Generating Parameter Value")+ylab("Estimated Parameter Value")
+
+#BETA
+theCaption<-paste("Recovered subject-level beta generating values for ", (sum(as.numeric(sub_summary$recover_beta)-1)/length(sub_summary$recover_beta)*100),"% of subjects\n",sep="")
+ggplot(data=sub_summary,aes(x=genbeta,y=fitbeta,colour=recover_alpha))+
+  geom_point(alpha=.2)+
+  geom_errorbar(aes(ymin=fitbeta_hdilo,ymax=fitbeta_hdihi),alpha=.2)+
+  geom_abline(intercept=0,slope=1)+
+  coord_cartesian(xlim = c(.35,.65),ylim = c(.35, .65))+theme_bw()+
+  labs(caption=theCaption,title = "Beta - Subject-Level Parameter Recovery")+
+  scale_color_manual(values = c("1"="#66a182","0" = "#d1495b"))+theme(legend.position="none")+  
+  xlab("Generating Parameter Value")+ylab("Estimated Parameter Value")
+
+#DELTA
+theCaption<-paste("Recovered subject-level delta generating values for ", (sum(as.numeric(sub_summary$recover_delta)-1)/length(sub_summary$recover_delta)*100),"% of subjects\n",sep="")
+ggplot(data=sub_summary,aes(x=gendelta,y=fitdelta,colour=recover_alpha))+
+  geom_point(alpha=.2)+
+  geom_errorbar(aes(ymin=fitdelta_hdilo,ymax=fitdelta_hdihi),alpha=.2)+
+  geom_abline(intercept=0,slope=1)+
+  coord_cartesian(xlim = c(-1.7,.7),ylim = c(-1.7, .7))+theme_bw()+
+  labs(caption=theCaption,title = "Delta - Subject-Level Parameter Recovery")+
+  scale_color_manual(values = c("1"="#66a182","0" = "#d1495b"))+theme(legend.position="none")+  
+  xlab("Generating Parameter Value")+ylab("Estimated Parameter Value")
+
+rm(list=c('allmcmc','sub_summary','sim_summary'))
+invisible(gc())
+
+```
+ 
+# Initial Convergence Diagnostics
+
+Basic diagnostics were performed for all models (check for no divergences and -- for all parameters -- rhat's<1.1, well-mixed trace plots, low autocorrelation by lag of ~30, good ESS). Models performed well by these standards, suggesting no problems with convergence. But we do not include those here for brevity. Instead, we only present these complete diagnostics below for the final two considered models (Model 9 and 10).
+
+# Model Comparison
+
+```{r id14, echo=FALSE}
+
+# Code below calls summary data for fitted parameter recovery simulations that were run using separate 'run_hddm_*.R' scripts for each model (available on OSF and GitHub)
+
+################################################################################
+
+# Prep data: Extract loglik values from giant (>40GB) stanfit or cmdstanfit .csvs and calculate LOO-CV (overall, by group, and by subject)
+
+################################################################################
+# note: To perform model comparisons, models 1,2,5,6,7,8,9,10 were run in Stan with 8000 TOTAL postwarmup draws. But due to computing demands, we needed to change packages (from Rstan to cmdstanr) and computing environments. As such there is some variability in how these were run (which requires slightly different prep of models). Because the models were determined to have converged and so the variability should not impact the samples themselves. 
+
+################################################################################
+
+models<-c('m1','m2','m5','m6','m7','m8','m9','m10') #add m10 once it's done running
+
+### Note: First section is for models 1-7 (run in RStan), last section is for Model 8,9,10 (run in cmdstanr)
+for (g in 1:length(models)){
+  model<-models[g]
+  if (model!='m8' && model!='m9' && model!='m10'){ #if model run in rstan
+    
+    # set PATH to parent directory
+    outpath <- '/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_'
+    modelpath<-paste(outpath,model,'/log_lik/loglik_stanfit.RData',sep="")
+    the_loglikfile<-paste(outpath,model,'/log_lik/loglik_group1.RData',sep="")
+    
+    if (file.exists(the_loglikfile)){ #if loglik file exists, do nothing
+    }else{ #if loglik file doesnt exist, process the data
+      load(modelpath)
+      
+      fit<-modelfit$outputs$stanfit
+      rm(modelfit)
+      invisible(gc())
+      
+      #load real observed data
+      real_data<-read.csv("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/data/gaze_beh.csv")
+      real_data$subjID<-match(real_data$subj, unique(real_data$subj)) #subj IDs to sequential indexes 
+      real_data<-subset(real_data,select=c(group,subj)) #grab group and subj cols
+      n_groups<-length(unique(real_data$group)) #get number of groups
+      
+      ####################################################################
+      # do sample level loglik calculation (all subjects combined)
+      ####################################################################
+      
+      all_loglik<-extract_log_lik(fit,parameter_name = "log_lik",merge_chains = FALSE) #all_loglik 
+      rm(fit)
+      invisible(gc())
+      reff<-relative_eff(exp(all_loglik))
+      filename<-paste(outpath,model,'/log_lik/loglik_all.RData',sep="")
+      loo_1 <- loo(all_loglik, r_eff = reff, cores = 8)
+      save(loo_1,file = filename)
+      
+      ####################################################################
+      # do group level loglik calculation
+      ####################################################################
+      
+      for (i in 1:n_groups){
+        filename<-paste(outpath,model,'/log_lik/loglik_group',i,'.RData',sep="")
+        # if extracted loglik +  loo file doesn't exist for this model + group, generate it
+        if (file.exists(filename)){
+        }else{
+          group_ids<-which(real_data$group==i) #find  indices for current group
+          group_loglik<-all_loglik[,,group_ids] #get loglik data for current group
+          group_reff<-reff[group_ids] #get loglik data for current group
+          loo_1 <- loo(group_loglik, r_eff = group_reff, cores = 8)
+          save(loo_1,file = filename)
+        }
+        text<-paste("*LOO RESULTS FOR GROUP: ",i, sep="")
+        print(text)
+        print(loo_1)
+      }
+      
+      ####################################################################
+      # do loglik calculation at the subject level (only save summary info because the file is massive)
+      ####################################################################
+      
+      subjs<-unique(real_data$subj)
+      
+      # setup subj loo data frame (summary vals only)
+      loo_headers<-c('model','group','subj','looic','looic_se','delta_loo', 'pareto_k_good','pareto_k_ok','pareto_k_bad','pareto_k_verybad')
+      subj_loo<-data.frame(matrix(data=NA,nrow=length(subjs),ncol=length(loo_headers)))
+      colnames(subj_loo)<-loo_headers
+      
+      filename<-paste(outpath,model,'/log_lik/loglik_subj.RData',sep="")
+      
+      # if extracted subj level loglik +loo file doesn't exist, generate it
+      if (file.exists(filename)){
+      }else{
+        for (i in 1:length(subjs)){
+          subj_ids<-which(real_data$subj==subjs[i]) #find all indices for current subj
+          subj_loglik<-all_loglik[,,subj_ids] #get loglik data for current subj
+          subj_reff<-reff[subj_ids] #get loglik data for current subj
+          loo_1 <- loo(subj_loglik, r_eff = subj_reff, cores = 8)
+      
+          #save summary info to running subj_loo file and save
+          subj_loo$model[i]<-model
+          subj_loo$group[i]<-unique(subset(real_data$group,real_data$subj==subjs[i]))#get subj's group
+          subj_loo$subj[i]<-subjs[i]
+          subj_loo$looic[i]<-round(data.frame(loo_1$estimates)[3,1],2)
+          subj_loo$looic_se[i]<-round(data.frame(loo_1$estimates)[3,2],2)
+          subj_loo$pareto_k_good[i]<-sum(loo_1$diagnostics$pareto_k < .5) #good
+          subj_loo$pareto_k_ok[i]<-sum(loo_1$diagnostics$pareto_k >= .5 & loo_1$diagnostics$pareto_k < .7) #ok
+          subj_loo$pareto_k_bad[i]<-sum(loo_1$diagnostics$pareto_k >= .7 & loo_1$diagnostics$pareto_k < 1)#bad
+          subj_loo$pareto_k_verybad[i]<-sum(loo_1$diagnostics$pareto_k >= 1)#very bad
+      
+          #save
+          save(subj_loo,file = filename)
+          text<-paste("*LOO RESULTS FOR SUBJ: ",i, sep="")
+          print(text)
+          print(loo_1)
+        }
+      }
+    }
+    
+  }else{ #if model run in cmdstanr  (model 8,9,10 only). Note: model 8 ran with 40 chains, 2500 warmup, 200 iterations/ model9/10 ran with 36 chains, 2500 warmup, 225 postwarmup. we account for this below
+    
+    if(model=='m8'){# if model 8, specify 40 chains and 200 postwarmup iterations
+      chains=40
+      iter=200 #40 chains, 2500 warmup, 200 postwarmup draws/chains = 8000 postwarmup iterations
+    }else{ #if model 9 or 10, specify 36 chains and 225 postwarmup
+      chains=36
+      iter=225 
+    }
+    
+    modelpath<-paste(outpath,model,'/log_lik/loglik_raw.RData',sep="")
+    
+    if(file.exists(modelpath)){ #if raw extracted loglik file exists, do nothing
+    }else{ #otherwise, process it.
+      
+      fitdir<-paste("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_",model,"/log_lik/",sep="")
+      setwd(fitdir)
+      
+      #read in all .csv files
+      files <- (Sys.glob("*.csv"))
+      
+      for (i in 1:length(files)){
+        print(i)
+        tmpfile<-paste(fitdir,files[i],sep="")
+        
+        #only grab the first 200 rows of samples.
+        tmpdata<-fread(tmpfile,skip=50,nrows=iter)
+        
+        if (i==1){
+            alldata<-tmpdata
+        }else{
+          alldata<-rbind(alldata,tmpdata)
+        }
+      }
+      
+      myheaders<-read.csv(tmpfile,skip=45,nrows=1)
+      my_colnames <- colnames(myheaders) 
+      colnames(alldata)<-my_colnames
+      
+      #save combined cmdstan fit object to .RData file
+      fitname<-paste(fitdir,"loglik_stanfit_cmdstan",".RData",sep = "") 
+      save(alldata, file = fitname)
+      
+      #grab only log_lik cols
+      cols<-grep("log_lik", colnames(alldata)) 
+      col1<-min(cols)
+      col2<-max(cols)
+      alldata2<-data.frame(alldata)
+      alldata2<-alldata2[,cols]
+      
+      fitname<-paste(fitdir,"loglik_raw",".RData",sep = "") 
+      save(alldata2, file = fitname)
+    }
+    
+    the_loglikfile<-paste(outpath,model,'/log_lik/loglik_group1.RData',sep="")
+    
+    if(file.exists(the_loglikfile)){ #if extracted loglik file exists, do nothing
+    }else{#if extracted loglik file doesnt exist, process it now
+      
+      #loads raw loglik values in a matrix called "alldata2" (#iterations [8000] * n_observations [50062])
+      load(modelpath)
+      
+      #generate chain IDs
+      for (i in 1:chains){
+        tmp_chainID<-rep(i,iter)
+        if(i==1){
+          chain_id<-tmp_chainID
+        }else{
+          chain_id<-c(chain_id,tmp_chainID)
+        }
+      }
+      
+      ####################################################################
+      # do loglik calculation for all subjects combined
+      ####################################################################
+      
+      r_eff<-relative_eff(as.matrix(exp(alldata2)),chain_id,cores = 8)
+      loo_1<-loo(as.matrix(alldata2),r_eff = r_eff, cores = 8)
+      filename<-paste(outpath,model,'/log_lik/loglik_all.RData',sep="")
+      save(loo_1,file = filename)
+      
+      ####################################################################
+      # do loglik calculation at the group level 
+      ####################################################################
+      
+      #load real data
+      real_data<-read.csv("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/data/gaze_beh.csv")
+      real_data$subjID<-match(real_data$subj, unique(real_data$subj)) #subj IDs to sequential indexes 
+      real_data<-subset(real_data,select=c(group,subj)) #grab only group and subj cols
+      n_groups<-length(unique(real_data$group)) #get number of groups
+          
+      for (i in 1:n_groups){
+        filename<-paste(outpath,model,'/log_lik/loglik_group',i,'.RData',sep="")
+        # if extracted loglik +  loo file doesn't exist for this model + group, generate it
+        if (file.exists(filename)){
+        }else{
+          group_ids<-which(real_data$group==i) #find all indices for current group
+          group_loglik<-alldata2[,group_ids] #get loglik data for current group
+          group_reff<-r_eff[group_ids] #get loglik data for current group
+          loo_1<-loo(as.matrix(group_loglik),r_eff = group_reff, cores = 8)
+          save(loo_1,file = filename)
+        }
+        text<-paste("*LOO RESULTS FOR GROUP: ",i, sep="")
+        print(text)
+        print(loo_1)
+      }
+      
+      ####################################################################
+      # do loglik calculation at the subject level (only save summary info)
+      ####################################################################
+      subjs<-unique(real_data$subj)
+      
+      #setup subj loo data frame (summary vals only)
+      loo_headers<-c('model','group','subj','looic','looic_se','delta_loo', 'pareto_k_good','pareto_k_ok','pareto_k_bad','pareto_k_verybad')
+      subj_loo<-data.frame(matrix(data=NA,nrow=length(subjs),ncol=length(loo_headers)))
+      colnames(subj_loo)<-loo_headers
+      
+      filename<-paste(outpath,model,'/log_lik/loglik_subj.RData',sep="")
+      
+      # if extracted subj level loglik +loo file doesn't exist for model, generate it
+      if (file.exists(filename)){
+      }else{
+        for (i in 1:length(subjs)){
+          subj_ids<-which(real_data$subj==subjs[i]) #find all indices for current subj
+          subj_loglik<-alldata2[,subj_ids] #get loglik data for current subj
+          subj_reff<-r_eff[subj_ids] #get loglik data for current subj
+          #loo_1 <- loo(subj_loglik, r_eff = subj_reff, cores = 8)
+          loo_1<-loo(as.matrix(subj_loglik),r_eff = subj_reff, cores = 8)
+          #save summary info to running subj_loo file and save
+          subj_loo$model[i]<-model
+          subj_loo$group[i]<-unique(subset(real_data$group,real_data$subj==subjs[i]))#get subj's group
+          subj_loo$subj[i]<-subjs[i]
+          subj_loo$looic[i]<-round(data.frame(loo_1$estimates)[3,1],2)
+          subj_loo$looic_se[i]<-round(data.frame(loo_1$estimates)[3,2],2)
+          subj_loo$pareto_k_good[i]<-sum(loo_1$diagnostics$pareto_k < .5) #good
+          subj_loo$pareto_k_ok[i]<-sum(loo_1$diagnostics$pareto_k >= .5 & loo_1$diagnostics$pareto_k < .7) #ok
+          subj_loo$pareto_k_bad[i]<-sum(loo_1$diagnostics$pareto_k >= .7 & loo_1$diagnostics$pareto_k < 1)#bad
+          subj_loo$pareto_k_verybad[i]<-sum(loo_1$diagnostics$pareto_k >= 1)#very bad
+      
+          #save
+          save(subj_loo,file = filename)
+          text<-paste("*LOO RESULTS FOR SUBJ: ",i, sep="")
+          print(text)
+          print(loo_1)
+        }
+      }
+    }
+  }
+}
+
+```
+ 
+## Full Sample Model Compare
+
+Do model comparison across all 3 groups combined.
+
+```{r id15, echo=FALSE, fig.height=6, fig.show="hold", fig.width=11, message=FALSE, warning=FALSE, dpi=500, out.width='1500px', tidy=T}
+
+# set PATH to parent directory
+outpath <- '/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_'
+models<-c('m1','m2','m5','m6','m7','m8','m9','m10')
+loo_headers<-c('model','looic','looic_se','delta_loo', "pareto_k_good","pareto_k_ok","pareto_k_bad","pareto_k_verybad")
+all_loo<-data.frame(matrix(data=NA,nrow=length(models),ncol=length(loo_headers)))
+colnames(all_loo)<-loo_headers
+
+# Pareto k diagnostic values:
+#                         
+# (-Inf, 0.5]   (good)         
+#  (0.5, 0.7]   (ok)             
+#    (0.7, 1]   (bad)    
+#    (1, Inf)   (very bad)    
+
+for (i in 1:length(models)){
+  
+  load(paste(outpath,models[i],'/log_lik/loglik_all.RData',sep=""))
+  all_loo$model[i]<-models[i]
+  all_loo$looic[i]<-round(data.frame(loo_1$estimates)[3,1],2)
+  all_loo$looic_se[i]<-round(data.frame(loo_1$estimates)[3,2],2)
+  all_loo$pareto_k_good[i]<-sum(loo_1$diagnostics$pareto_k < .5) #good 
+  all_loo$pareto_k_ok[i]<-sum(loo_1$diagnostics$pareto_k >= .5 & loo_1$diagnostics$pareto_k < .7) #ok 
+  all_loo$pareto_k_bad[i]<-sum(loo_1$diagnostics$pareto_k >= .7 & loo_1$diagnostics$pareto_k < 1)#bad 
+  all_loo$pareto_k_verybad[i]<-sum(loo_1$diagnostics$pareto_k >= 1)#very bad 
+}
+
+#sort table by from lowest to highest loo val
+all_loo <- all_loo[order(all_loo$looic,decreasing=FALSE),]
+
+#calculate delta loo
+for (i in 1:length(models)){
+  if (i > 1){
+    all_loo$delta_loo[i]<-round(all_loo$looic[i]-all_loo$looic[1],2)
+  }
+}
+
+#print 
+all_loo
+
+rm(list=c('loo_1'))
+invisible(gc())
+```
+
+## Group Level Model Compare
+
+Compares all models separately by group.
+
+```{r id16, echo=FALSE, fig.height=6, fig.show="hold", fig.width=11, message=FALSE, warning=FALSE, dpi=500, out.width='1500px', tidy=T}
+
+# set PATH to parent directory
+outpath <- '/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_'
+models<-c('m1','m2','m5','m6','m7','m8','m9','m10')
+groups<-c('hc','bd','sz')
+loo_headers<-c('group','model','looic','looic_se', 'delta_loo', "pareto_k_good","pareto_k_ok","pareto_k_bad","pareto_k_verybad")
+group_loo<-data.frame(matrix(data=NA,nrow=length(models),ncol=length(loo_headers)))
+colnames(group_loo)<-loo_headers
+
+# Pareto k diagnostic values:
+# (-Inf, 0.5]   (good)         
+#  (0.5, 0.7]   (ok)             
+#    (0.7, 1]   (bad)    
+#    (1, Inf)   (very bad)    
+
+for (h in 1:length(groups)){
+  for (i in 1:length(models)){
+    load(paste(outpath,models[i],'/log_lik/loglik_group',h,'.RData',sep=""))
+    group_loo$group[i]<-groups[h]
+    group_loo$model[i]<-models[i]
+    group_loo$looic[i]<-round(data.frame(loo_1$estimates)[3,1],2)
+    group_loo$looic_se[i]<-round(data.frame(loo_1$estimates)[3,2],2)
+    group_loo$pareto_k_good[i]<-sum(loo_1$diagnostics$pareto_k < .5) #good 
+    group_loo$pareto_k_ok[i]<-sum(loo_1$diagnostics$pareto_k >= .5 & loo_1$diagnostics$pareto_k < .7) #ok 
+    group_loo$pareto_k_bad[i]<-sum(loo_1$diagnostics$pareto_k >= .7 & loo_1$diagnostics$pareto_k < 1)#bad 
+    group_loo$pareto_k_verybad[i]<-sum(loo_1$diagnostics$pareto_k >= 1)#very bad 
+  }
+  #sort table by from lowest to highest loo val
+  group_loo <- group_loo[order(group_loo$looic,decreasing=FALSE),]
+  
+  #calculate delta loo
+  for (i in 1:length(models)){
+    if (i > 1){
+      group_loo$delta_loo[i]<-round(group_loo$looic[i]-group_loo$looic[1],2)
+    }else{
+      group_loo$delta_loo[i]<-NA
+    }
+  }
+  
+  #append to larger table
+  if (h==1){
+    all_group_loo<-group_loo
+  }else{
+    all_group_loo<-rbind(all_group_loo,group_loo)
+  }
+}
+
+#print table
+all_group_loo
+
+rm(list=c('loo_1'))
+invisible(gc())
+
+```
+ 
+## Model Comparison Summary
+
+Model performs better when drift rate allowed to vary by gaze condition (eg model 2 vs 1) and performs better when drift rate also allowed to vary by head condition (eg model 9,10 vs others). This is true at the whole-sample, group-, and subject level. Model performs slightly better when drift rate allowed to vary by gaze AND head condition AND emo condition (model 10) but still within SE of model 9 (where only drift varies by head and gaze conditions). Again, this is true at the whole-sample, group-, and subject level. We also see that the models run into some difficulties when start point is allowed to vary by emotion condition (model 7 and 8 have a few high pareto K values). Based on this, model 9 and 10 are still under consideration (so we will run posterior predictive checks on these 2 models. If no major differences in posterior predictions, we will opt for model 10 (the better fitting model based on LOO).
+  
+# Posterior Predictive Checks (Model 9,10 only)
+
+The leading models (m9,m10) were run with a larger number of samples to perform posterior predictive checks. Models 9,10 were ran on HPC in cmdstanr with 36 chains over 36 cores, with 2500 warmup, 2000 postwarmup draws = 72000 postwarmup samples
+ 
+```{r id18, echo=FALSE}
+# Prep Data: loop through cmdstanr .csv files and combine into single data frame (postwarmup draws x # pars) where #postwarmup draws = rows of all draws from chain 1 (2000 rows), then all draws from chain 2 and so-on)
+
+warmup<-2500
+iter<-2000
+models<-c('m9','m10')
+outpath<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/"
+
+for (i in 1:length(models)){
+  model<-paste("hddm_",models[i],sep="")
+  the_fitfile<-paste(outpath,model,'/final_fit/stanfit_cmdstan.RData',sep="")
+  if(file.exists(the_fitfile)){ #if extracted stanfit file exists, do nothing
+  }else{
+    fitdir<-paste(outpath,model,'/final_fit/',sep="")
+    setwd(fitdir)
+
+    #read in all .csv files
+    files <- (Sys.glob("*.csv"))
+    skip_rows<-50+warmup #csvs for m9 and m10 included 2500 warmup so we have to exclude those + initial 50 rows of cmdstan comments
+    
+    for (j in 1:length(files)){
+      tmpfile<-paste(fitdir,files[j],sep="")
+      tmpdata<-fread(tmpfile,skip=skip_rows,nrows=iter)
+      if (j==1){
+          alldata<-tmpdata
+      }else{
+        alldata<-rbind(alldata,tmpdata)
+      }
+    }
+    
+    myheaders<-read.csv(tmpfile,skip=45,nrows=1)
+    my_colnames <- colnames(myheaders) 
+    colnames(alldata)<-my_colnames
+    
+    #save combined cmdstan fit object to .RData file
+    fitname<-paste(fitdir,"stanfit_cmdstan",".RData",sep = "") 
+    save(alldata, file = fitname)
+  }
+}
+
+```
+
+## Verify Convergence
+ 
+### Convergence (Model 9) 
+
+```{r id19, echo=FALSE, fig.height=1.5, fig.width=3.5, message=FALSE, warning=FALSE, tidy=TRUE}
+
+n_chains<-36
+postwarmup_draws<-2000
+
+load("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m9/final_fit/stanfit_cmdstan.RData")
+alldata<-data.frame(alldata)
+
+# check for divergent transitions
+divmsg<-paste('There were ',sum(alldata$divergent__),' divergent transitions after warmup',sep='')
+print(divmsg)
+
+# narrow down parameters to examine
+
+#grab sigma data 
+tmp_col<-grep("sig_", colnames(alldata),fixed = TRUE) 
+sigdata<-alldata[,tmp_col] 
+
+#grab group data 
+tmp_col<-grep("mu_", colnames(alldata),fixed = TRUE) 
+mudata<-alldata[,tmp_col]
+## remove untransformed params
+tmp_col<-grep("_pr.", colnames(mudata),fixed = TRUE) 
+mudata<-mudata[,-tmp_col] 
+
+#grab subdata 
+tmp_col<-grep("sub_", colnames(alldata),fixed = TRUE) 
+subdata<-alldata[,tmp_col]
+## remove untransformed params
+tmp_col<-grep("_pr.", colnames(subdata),fixed = TRUE) 
+subdata<-subdata[,-tmp_col] 
+
+#combine
+alldata<-cbind(mudata,sigdata,subdata)
+params<-colnames(alldata)
+
+# calculate rhat, ESS
+fit_summaryfile<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m9/final_fit/fit_summary.RData"
+if(file.exists(fit_summaryfile)){ #only calculate if fit summary hasn't been processed yet
+  load(fit_summaryfile)
+}else{
+  for (i in 1:length(params)){
+    tmp_data<-alldata[,i]
+    tmp_matrix<-matrix(tmp_data,nrow=postwarmup_draws,ncol=n_chains,byrow=FALSE) #make this back into matrix (#draws * #chains)
+    tmp_summary<-data.frame(
+      parameter=params[i],
+      rhat=round(rhat(tmp_matrix),2),
+      bulk_ess=round(posterior::ess_bulk(tmp_matrix),0),
+      tail_ess=round(posterior::ess_tail(tmp_matrix),0))
+    
+    if(i==1){
+      fit_summary<-tmp_summary
+    }else{
+      fit_summary<-rbind(fit_summary,tmp_summary)
+    }
+  }
+  save(fit_summary,file=fit_summaryfile)
+}
+
+fit_summary
+
+# trace plots for group parameters
+
+#keep only group parameters
+tmp_col<-grep("sub_", params,fixed = TRUE) 
+params<-params[-tmp_col] 
+bayesplot_theme_set(theme_default(base_size = 8, base_family = "sans"))
+
+for (i in 1:length(params)){
+  tmp_data<-alldata[,i]
+  tmp_matrix<-matrix(tmp_data,nrow=postwarmup_draws,ncol=n_chains,byrow=FALSE) #make this back into matrix (#draws * #chains)
+  post_draws<-simplify2array(list(tmp_matrix))
+  dimnames(post_draws)<-list(Iteration=seq(from=1,to=postwarmup_draws,by=1),
+                             Chain=seq(from=1,to=n_chains,by=1),
+                             Parameter=params[i])
+  title<-paste("Model 9: ", params[i], sep="")
+  p<-mcmc_trace(post_draws,pars=params[i])+legend_none()+ggtitle(title)
+  print(p)
+}
+
+```
+ 
+Note: we originally examined all 36 chains for autocorrelation. But here we randomly select 6 and display those (for brevity)
+
+```{r id20, echo=FALSE, fig.height=2, fig.width=3, message=FALSE, warning=FALSE, tidy=TRUE}
+
+#Autocorrelation for group parameters
+chain_nums<-seq(from=1,to=n_chains,by=1)
+subsample_chains<-6 #of of chains to subsample and display autocorr for
+
+for (i in 1:length(params)){
+  tmp_data<-alldata[,i]
+  tmp_matrix<-matrix(tmp_data,nrow=postwarmup_draws,ncol=n_chains,byrow=FALSE) #make this back into matrix (#draws * #chains)
+  rand_chains<-sample(seq(from=1,to=n_chains,by=1),subsample_chains,replace=FALSE) #randomly samplle some chains
+  tmp_matrix<-tmp_matrix[,rand_chains] #get only data for those chains
+  post_draws<-simplify2array(list(tmp_matrix))
+  dimnames(post_draws)<-list(Iteration=seq(from=1,to=postwarmup_draws,by=1),
+                             Chain=rand_chains,
+                             Parameter=params[i])
+  title<-paste("Model 9: ", params[i], sep="")
+  p<-mcmc_acf(post_draws[,,1], lags=30)+ggtitle(title)
+  print(p)
+}
+
+rm(list=c('alldata'))
+invisible(gc())
+
+```
+ 
+### Convergence (Model 10) 
+
+```{r id21, echo=FALSE, fig.height=1.5, fig.width=3.5, message=FALSE, warning=FALSE, tidy=TRUE}
+
+n_chains<-36
+postwarmup_draws<-2000
+
+load("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/final_fit/stanfit_cmdstan.RData")
+alldata<-data.frame(alldata)
+
+# check for divergent transitions
+divmsg<-paste('There were ',sum(alldata$divergent__),' divergent transitions after warmup',sep='')
+print(divmsg)
+
+# narrow down parameters to examine
+
+#grab sigma data 
+tmp_col<-grep("sig_", colnames(alldata),fixed = TRUE) 
+sigdata<-alldata[,tmp_col] 
+
+#grab group data 
+tmp_col<-grep("mu_", colnames(alldata),fixed = TRUE) 
+mudata<-alldata[,tmp_col]
+## remove untransformed params
+tmp_col<-grep("_pr.", colnames(mudata),fixed = TRUE) 
+mudata<-mudata[,-tmp_col] 
+
+#grab subdata 
+tmp_col<-grep("sub_", colnames(alldata),fixed = TRUE) 
+subdata<-alldata[,tmp_col]
+## remove untransformed params
+tmp_col<-grep("_pr.", colnames(subdata),fixed = TRUE) 
+subdata<-subdata[,-tmp_col] 
+
+#combine
+alldata<-cbind(mudata,sigdata,subdata)
+params<-colnames(alldata)
+
+# calculate rhat, ESS
+fit_summaryfile<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/final_fit/fit_summary.RData"
+if(file.exists(fit_summaryfile)){ #only calculate if fit summary hasn't been processed yet
+  load(fit_summaryfile)
+}else{
+  for (i in 1:length(params)){
+    tmp_data<-alldata[,i]
+    tmp_matrix<-matrix(tmp_data,nrow=postwarmup_draws,ncol=n_chains,byrow=FALSE) #make this back into matrix (#draws * #chains)
+    tmp_summary<-data.frame(
+      parameter=params[i],
+      rhat=round(rhat(tmp_matrix),2),
+      bulk_ess=round(posterior::ess_bulk(tmp_matrix),0),
+      tail_ess=round(posterior::ess_tail(tmp_matrix),0))
+    
+    if(i==1){
+      fit_summary<-tmp_summary
+    }else{
+      fit_summary<-rbind(fit_summary,tmp_summary)
+    }
+  }
+  save(fit_summary,file=fit_summaryfile)
+}
+
+fit_summary
+
+#Trace plots for group parameters
+
+#keep only group parameters
+tmp_col<-grep("sub_", params,fixed = TRUE) 
+params<-params[-tmp_col] 
+
+bayesplot_theme_set(theme_default(base_size = 8, base_family = "sans"))
+for (i in 1:length(params)){
+  tmp_data<-alldata[,i]
+  tmp_matrix<-matrix(tmp_data,nrow=postwarmup_draws,ncol=n_chains,byrow=FALSE) #make this back into matrix (#draws * #chains)
+  post_draws<-simplify2array(list(tmp_matrix))
+  dimnames(post_draws)<-list(Iteration=seq(from=1,to=postwarmup_draws,by=1),
+                             Chain=seq(from=1,to=n_chains,by=1),
+                             Parameter=params[i])
+  title<-paste("Model 10: ", params[i], sep="")
+  p<-mcmc_trace(post_draws,pars=params[i])+legend_none()+ggtitle(title)
+  print(p)
+}
+
+```
+
+Note: we originally examined all 36 chains for autocorrelation. But here we randomly select 6 and display those (for brevity)
+
+```{r id22, echo=FALSE, fig.height=2, fig.width=3, message=FALSE, warning=FALSE, tidy=TRUE}
+
+#Autocorrelation for group parameters
+
+chain_nums<-seq(from=1,to=n_chains,by=1)
+subsample_chains<-6 #of of chains to subsample and display autocorr for
+
+for (i in 1:length(params)){
+  tmp_data<-alldata[,i]
+  tmp_matrix<-matrix(tmp_data,nrow=postwarmup_draws,ncol=n_chains,byrow=FALSE) #make this back into matrix (#draws * #chains)
+  rand_chains<-sample(seq(from=1,to=n_chains,by=1),subsample_chains,replace=FALSE) #randomly sample some chains
+  tmp_matrix<-tmp_matrix[,rand_chains] #get only data for those chains
+  post_draws<-simplify2array(list(tmp_matrix))
+  dimnames(post_draws)<-list(Iteration=seq(from=1,to=postwarmup_draws,by=1),
+                             Chain=rand_chains,
+                             Parameter=params[i])
+  title<-paste("Model 10: ", params[i], sep="")
+  p<-mcmc_acf(post_draws[,,1], lags=30)+ggtitle(title)
+  print(p)
+}
+
+rm(list=c('alldata'))
+invisible(gc())
+
+```
+ 
+## Posterior Predicted Quantiles
+
+### Predicted RT Quantiles (Model 9) 
+
+```{r id23, echo=FALSE, fig.height=3.5, fig.width=4, message=FALSE, warning=FALSE}
+
+#Note: Predicted quantiles for model 9 and 10 were run on a computing cluster using 'run_quantile_estimate_m9_um.R' and 'run_quantile_estimate_m10_um.R' scripts because it takes several days to run. Code is included below and in following sections for ease of access.
+
+estimated_quantile_file<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m9/ppc/quantile_estimates_hdi.RData"
+
+#load real observed data
+real_data<-read.csv('/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/data/gaze_beh.csv',header=TRUE) #load real observed data
+real_data$subjID<-match(real_data$subj, unique(real_data$subj)) #subj IDs to sequential indexes 
+
+quantiles<-c(.1,.3,.5,.7,.9)
+groups<-unique(real_data$group)
+subjs<-unique(real_data$subjID)
+gaze_conds<-unique(real_data$cond)
+emo_conds<-unique(real_data$cond_other_emo)
+head_conds<-unique(real_data$cond_other_head)
+emohead_conds<-unique(real_data$cond_other_emo_head)
+acc<-unique(real_data$acc)
+choices<-unique(real_data$choice)
+n_obs<-dim(real_data)[1]
+cores<-10
+
+if(file.exists(estimated_quantile_file)){ #if file exists,load it
+  load(estimated_quantile_file)
+}else{ #if file doesn't exist, run code to estimate quantiles
+  
+  load("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m9/final_fit/stanfit_cmdstan.RData") #load posterior samples
+  posterior<-data.frame(alldata)
+  iterations=dim(posterior)[1] #number of posterwarmup draws
+  rm(alldata)
+  invisible(gc())
+  
+  #setup cluster on computer for parallel processing
+  cluster <- makeCluster(cores) #Leave one core to avoid overload your computer
+  registerDoParallel(cluster)
+  
+  # get subj level variables (group and minRT) and subj*cond*choice level variables (ie how many trials each subject has for each gaze condition, choice)
+  for (i in 1:length(subjs)){
+    tmpdata<-subset(real_data,real_data$subjID==i) 
+    #get min Rt and group for this subj
+    tmp_subj_vars<-data.frame(subj=i,group=unique((tmpdata$group)),minRT=min(tmpdata$rt))
+    if (i==1){
+      subj_vars<-tmp_subj_vars
+    }else{
+      subj_vars<-rbind(subj_vars,tmp_subj_vars)
+    }
+    for (j in 1:length(gaze_conds)){
+      for (k in 1:length(head_conds)){
+        for (l in 1:length(choices)){
+          tmpdata<-dim(subset(real_data,real_data$subjID==i & real_data$cond == j & real_data$other_cond_head == k & real_data$choice == l))[1]
+          tmp_cond_vars<-data.frame(subj=i,gaze_cond=j,head_cond=k,choice=l,trials=tmpdata)
+          if (i==1 & j==1 & k==1 & l==1){
+            cond_vars<-tmp_cond_vars
+          }else{
+            cond_vars<-rbind(cond_vars,tmp_cond_vars)
+          }
+        }
+      }
+    }
+  }
+  
+  #get group level vars
+  for (i in 1:length(groups)){
+    tmpdata<-subset(real_data,real_data$group==i)
+    tmp_group_vars<-data.frame(group=i,maxRT=max(tmpdata$rt))
+    if (i==1){
+      group_vars<-tmp_group_vars
+    }else{
+      group_vars<-rbind(group_vars,tmp_group_vars)
+    }
+  }
+  
+  #grab rand draws to subsample from full posterior to make the file size more manageable
+  set.seed(42)
+  
+  # prepare the posterior samples
+  ## subject parameters
+  sub_alpha_pr_samples<-posterior[,c(grep("sub_alpha_pr", colnames(posterior)))]
+  sub_beta_pr_samples<-posterior[,c(grep("sub_beta_pr", colnames(posterior)))] 
+  sub_delta_present1_pr_samples<-posterior[,c(grep("sub_delta_present_pr", colnames(posterior)))][,1:100]
+  sub_delta_present2_pr_samples<-posterior[,c(grep("sub_delta_present_pr", colnames(posterior)))][,101:200] 
+  sub_delta_absent1_pr_samples<-posterior[,c(grep("sub_delta_absent_pr", colnames(posterior)))][,1:100]
+  sub_delta_absent2_pr_samples<-posterior[,c(grep("sub_delta_absent_pr", colnames(posterior)))][,101:200]
+  sub_ndt_pr_samples<-posterior[,c(grep("sub_ndt_pr", colnames(posterior)))] 
+  
+  ## group parameters (means)
+  mu_grp_alpha_pr_samples<-posterior[,c(grep("mu_grp_alpha_pr", colnames(posterior)))] 
+  mu_grp_beta_pr_samples<-posterior[,c(grep("mu_grp_beta_pr", colnames(posterior)))] 
+  mu_grp_delta_present_pr_samples<-posterior[,c(grep("mu_grp_delta_present_pr", colnames(posterior)))] 
+  mu_grp_delta_absent_pr_samples<-posterior[,c(grep("mu_grp_delta_absent_pr", colnames(posterior)))] 
+  mu_grp_ndt_pr_samples<-posterior[,c(grep("mu_grp_ndt_pr", colnames(posterior)))] 
+  
+  ## group parameters (variances)
+  sig_grp_alpha_pr_samples<-posterior[,c(grep("sig_grp_alpha_pr", colnames(posterior)))] 
+  sig_grp_beta_pr_samples<-posterior[,c(grep("sig_grp_beta_pr", colnames(posterior)))] 
+  sig_grp_delta_pr_samples<-posterior[,c(grep("sig_grp_delta_pr", colnames(posterior)))] 
+  sig_grp_ndt_pr_samples<-posterior[,c(grep("sig_grp_ndt_pr", colnames(posterior)))] 
+  
+  ## other condition parameters (group level effect; 2x emo conditions)
+  cond_delta1_pr_samples<-(posterior[,c(grep("cond_delta_pr", colnames(posterior)))])[,1:3]
+  cond_delta2_pr_samples<-(posterior[,c(grep("cond_delta_pr", colnames(posterior)))])[,4:6]
+  
+  subsample<-1000 #how many draws should we randomly subsample from the full posterior 
+  
+  #create empty array for rt quantiles: #obs x #subsampled iterations x #quantiles
+  estim_quantiles <- array(numeric(),c(n_obs,subsample,length(quantiles))) 
+  #create empty array for predicted choice proportions: #obs x #subsampled iterations
+  estim_choice_props <- array(numeric(),c(n_obs,subsample)) 
+  
+  for (k in 1:n_obs){
+    tmp_subj<-real_data$subjID[k]
+    tmp_group<-real_data$group[k]
+    tmp_gazecond<-real_data$cond[k]
+    tmp_headcond<-real_data$cond_other_head[k]
+    tmp_choice<-real_data$choice[k]
+    tmp_minRT<-subj_vars$minRT[tmp_subj] #get this subj's min RT
+    
+    #rand subsample
+    rand_draws<-sample(seq(from=1,to=iterations,by=1),subsample)
+    
+    #randomly draw group mean, variance values 
+    tmp_mu_grp_alpha_pr<-as.numeric(unlist(mu_grp_alpha_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_beta_pr<-as.numeric(unlist(mu_grp_beta_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_delta_present_pr<-as.numeric(unlist(mu_grp_delta_present_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_delta_absent_pr<-as.numeric(unlist(mu_grp_delta_absent_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_ndt_pr<-as.numeric(unlist(mu_grp_ndt_pr_samples[rand_draws,tmp_group]))
+    
+    tmp_sig_grp_alpha_pr<-as.numeric(unlist(sig_grp_alpha_pr_samples[rand_draws,tmp_group]))
+    tmp_sig_grp_beta_pr<-as.numeric(unlist(sig_grp_beta_pr_samples[rand_draws,tmp_group]))
+    tmp_sig_grp_delta_pr<-as.numeric(unlist(sig_grp_delta_pr_samples[rand_draws,tmp_group]))
+    tmp_sig_grp_ndt_pr<-as.numeric(unlist(sig_grp_ndt_pr_samples[rand_draws,tmp_group]))
+    
+    # randomly draw condition level values
+    tmp_cond_delta1_pr<-as.numeric(unlist(cond_delta1_pr_samples[rand_draws,tmp_group]))
+    tmp_cond_delta2_pr<-as.numeric(unlist(cond_delta2_pr_samples[rand_draws,tmp_group]))
+    
+    #draw subj level values
+    tmp_sub_alpha_pr<-as.numeric(unlist(sub_alpha_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_beta_pr<-as.numeric(unlist(sub_beta_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_present1_pr<-as.numeric(unlist(sub_delta_present1_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_present2_pr<-as.numeric(unlist(sub_delta_present2_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_absent1_pr<-as.numeric(unlist(sub_delta_absent1_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_absent2_pr<-as.numeric(unlist(sub_delta_absent2_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_ndt_pr<-as.numeric(unlist(sub_ndt_pr_samples[rand_draws,tmp_subj]))
+    
+    # do transformations for non centered parameterization (scale raw subject par by group mean and variance)
+    tmp_alpha<-pnorm(tmp_mu_grp_alpha_pr + tmp_sub_alpha_pr*tmp_sig_grp_alpha_pr)*3.9+0.1
+    tmp_beta<-pnorm(tmp_mu_grp_beta_pr + tmp_sub_beta_pr*tmp_sig_grp_beta_pr)
+    tmp_delta_present1<-pnorm(tmp_mu_grp_delta_present_pr + tmp_sub_delta_present1_pr*tmp_sig_grp_delta_pr+tmp_cond_delta1_pr)*8-4
+    tmp_delta_present2<-pnorm(tmp_mu_grp_delta_present_pr + tmp_sub_delta_present2_pr*tmp_sig_grp_delta_pr+tmp_cond_delta2_pr)*8-4
+    tmp_delta_absent1<-pnorm(tmp_mu_grp_delta_absent_pr + tmp_sub_delta_absent1_pr*tmp_sig_grp_delta_pr+tmp_cond_delta1_pr)*8-4
+    tmp_delta_absent2<-pnorm(tmp_mu_grp_delta_absent_pr + tmp_sub_delta_absent2_pr*tmp_sig_grp_delta_pr+tmp_cond_delta2_pr)*8-4
+    tmp_ndt<-(pnorm(tmp_mu_grp_ndt_pr + tmp_sub_ndt_pr*tmp_sig_grp_ndt_pr)*tmp_minRT*0.9)/1000
+    
+    if(tmp_gazecond==1){#if gaze=direct
+      if(tmp_choice==1){#if choice =YES (correct)
+        resp<-"upper" #will use this variable for RWiener cdf function (pwiener) below)
+        tmp_beta1<-tmp_beta
+        if(tmp_headcond==1){#if head = forward
+          tmp_delta_cond<-tmp_delta_present1
+        }else{#if head = deviated
+          tmp_delta_cond<-tmp_delta_present2
+        }
+      }else{#if choice=NO (incorrect)
+        resp<-"lower"
+        tmp_beta1<-tmp_beta #im deliberately NOT flipping the beta here (1-beta) like i would usually bc qwiener func does this internally based on the resp specified
+        if(tmp_headcond==1){#if head = forward
+          tmp_delta_cond<-tmp_delta_present1 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else{#if head = deviated
+          tmp_delta_cond<-tmp_delta_present2 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }
+      }
+    }else{ #if gaze=indirect
+      if(tmp_choice==1){#if choice=YES (incorrect)
+        resp<-"upper"
+        tmp_beta1<-tmp_beta
+        if(tmp_headcond==1){#if head = forward
+          tmp_delta_cond<-tmp_delta_absent1 
+        }else{#if head = deviated
+          tmp_delta_cond<-tmp_delta_absent2 
+        }
+      }else{#if choice=NO (correct)
+        resp<-"lower"
+        tmp_beta1<-tmp_beta #deliberately NOT using 1-beta bc qwiener func does this internally based on the resp specified
+        if(tmp_headcond==1){#if head = forward
+          tmp_delta_cond<-tmp_delta_absent1 #deliberately NOT using(-1*delta) bc qwiener func does this internally based on the resp specified
+        }else{#if head = deviated
+          tmp_delta_cond<-tmp_delta_absent2 #deliberately NOT using(-1*delta) bc qwiener func does this internally based on the resp specified
+        }
+      }
+    }
+    
+    #define some variables that we will use to calculate the choice probs below
+    sigma<-1 #diffusion coefficient. fixed at 1
+    
+    qc<-foreach(l=1:length(tmp_alpha),.combine='rbind',.packages = c("RWiener","dplyr")) %dopar% {
+      
+      #calculate choice probabilities (needed to dead with defective CDF)
+      ## calc absolute start point
+      z<-tmp_alpha[l]*tmp_beta1[l] 
+      
+      boundary<-1 #1=upper, 0=lower
+      m<-1 #iteration tracker
+      tinc<-.01 #time increment
+      t<-c(tinc+tmp_ndt[l]) #ndt plus some tolerance
+      looking<-1 #status of routine within while statement
+      pt<-c(NA)
+      
+      ## calculate choice probabilities for current trial, parameters (whether it's upper or lower depends on observed choice of current trial)
+      if(tmp_choice==1){#if upper bound response, calculate prob of upper bound resp
+        tmp_choice_prob <- (exp(2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2) - exp(2*tmp_delta_cond[l]*(tmp_alpha[l]-z)/sigma^2))/(exp(2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2)-1)
+      }else{#if lower bound response, calculate prob of lower bound resp
+        tmp_choice_prob <- (exp(-2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2) - exp(-2*tmp_delta_cond[l]*z/sigma^2))/(exp(-2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2)-1)
+      }
+      
+      #loop thru all samples, calculating + fixing defective cdf, and terminating when prob from fixed CDF exceeds .9 + .01
+      while (looking==1){
+        #calculate DEFECTIVE cdf for the response given on this trial
+        
+        #im deliberately making rt here tinc+tmp_ndt bc the rwiener function subtracts out the ndt from the rt for us 
+        pt[m]<-pwiener(t[m],tmp_alpha[l],tmp_ndt[l],tmp_beta1[l],tmp_delta_cond[l],resp)
+        #fix the defective CDF (by dividing current prob value by the prob of the current choice)
+        pt[m]<-(pt[m])/tmp_choice_prob
+        test<-as.numeric(pt>max(quantiles)+.01)
+        looking<-as.numeric(sum(test)<2)
+        m<-m+1
+        t[m]<-t[m-1]+tinc
+      }
+      qc<-c(NA)
+      for (n in 1:length(quantiles)){
+        o <- last(which(pt<=quantiles[n]))
+        if (length(o)>0){#if it's not empty
+          qc[n] <- (t[o+1] - t[o])*(quantiles[n]-pt[o])/(pt[o+1]-pt[o]) + t[o]
+        }else{
+          qc[n] <- tmp_ndt[l] 
+        }
+      }
+      return(qc)
+    }
+    
+    estim_quantiles[k,,]<-qc
+    
+    #save quantile estimates every 1000 observations (in case things crash)
+    if(as.numeric(endsWith(as.character(unlist(k)), "000"))==1){
+      # save current estimated quantile data to .RData file
+      fitdir<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m9/ppc/"
+      fitname<-paste(fitdir,"quantile_estimates_hdi",".RData",sep = "") 
+      save(estim_quantiles, file = fitname)
+      print("saving data processed to this point")
+      
+    }
+    invisible(gc())
+    print(k)
+  }
+  
+  # save full estimated quantile data to .RData file
+  fitdir<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m9/ppc/"
+  fitname<-paste(fitdir,"quantile_estimates_hdi",".RData",sep = "") 
+  save(estim_quantiles, file = fitname)
+  
+  parallel::stopCluster(cl = cluster)
+  
+}
+
+###############################################################################
+# average predictions across subjects for each condition, choice, acc
+###############################################################################
+
+subsample<-1000
+
+#version1: plots across all conds (gaze, emo, head) separately
+for (j in 1:length(gaze_conds)){
+  for (k in 1:length(emohead_conds)){
+    for (l in 1:length(acc)){
+      for (m in 1:length(groups)){
+        
+        #get list of subjects in this group
+        current_subj_list<-unique(subset(real_data,real_data$group==groups[m])$subjID)
+        
+        #create empty array: #obs x #iterations x #quantiles
+        estim_pred_quantiles_over_subjs <- array(numeric(),c(length(current_subj_list),subsample,length(quantiles))) 
+        estim_real_quantiles_over_subjs <- array(numeric(),c(length(current_subj_list),length(quantiles))) 
+        
+        for (n in 1:length(current_subj_list)){
+          
+          #get real quantiles for this subj, condition,acc
+          tmp_realdata<-subset(real_data,real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$acc==(l-1))
+          
+          estim_real_quantiles_over_subjs[n,]<-quantile(tmp_realdata$rt,type=8)
+          
+          #get predicted quantiles (means) and HDI's
+          
+          ## get cols from n_obs that correspond to current cond, subj, acc
+          tmp_quant_cols<-which(real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$acc==(l-1))
+          #use those to select observations from the predicted quantiles array
+          tmp_quantile_est<-estim_quantiles[tmp_quant_cols,,]
+          
+          #average estimates over trials for this subject (gives matrix = #subsamples*#quantiles)
+          if(length(tmp_quant_cols)==0){ #if no trials for current condition for current subject, create array of NA
+            estim_pred_quantiles_over_subjs[n,,]<-matrix(NA,nrow=subsample,ncol=length(quantiles))
+          }else if(length(tmp_quant_cols)==1){
+            estim_pred_quantiles_over_subjs[n,,]<-tmp_quantile_est
+          }else{ # if subj has 2 or more trials for this cond
+            estim_pred_quantiles_over_subjs[n,,]<-apply(tmp_quantile_est, c(2,3), mean,na.rm=TRUE) 
+          }
+        }
+        
+        for (o in 1:length(quantiles)){
+          
+          tmp_hdi<-HDIofMCMC(estim_pred_quantiles_over_subjs[,,o])
+          tmp_hdi<-data.frame(quantile=quantiles[o],
+                              real_quantile_mean=mean(estim_real_quantiles_over_subjs[,o],na.rm = TRUE),
+                              pred_quantile_mean=mean(estim_pred_quantiles_over_subjs[,,o],na.rm = TRUE)*1000,
+                              hdi_lo=tmp_hdi[1]*1000,
+                              hdi_hi=tmp_hdi[2]*1000)
+          if(o==1){
+            all_hdi<-tmp_hdi
+          }else{
+            all_hdi<-rbind(all_hdi,tmp_hdi)
+          }
+        }
+        
+        #setup data in long form
+        quantile_data<-data.frame(
+          type=c(rep("real",length(quantiles)),rep("pred",length(quantiles))), # type of data (long form)
+          quantile=c(quantiles,quantiles), # quantiles
+          rt=c(all_hdi$real_quantile_mean,all_hdi$pred_quantile_mean), #type of quantile data
+          hdi_lo=c(all_hdi$real_quantile_mean,all_hdi$hdi_lo),
+          hdi_hi=c(all_hdi$real_quantile_mean, all_hdi$hdi_hi))
+        
+        quantile_data$group<-m
+        
+        if(m==1){#if group 1
+          grp_quantile_data<-quantile_data
+          grp1_trials<-dim(subset(real_data,real_data$group==m & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$acc==(l-1)))[1]
+        }else if(m==2){#if group 2
+          tmp_grp_quantile_data<-quantile_data
+          tmp_grp_quantile_data$quantile<-tmp_grp_quantile_data$quantile+.03 #shift to right for plotting
+          grp_quantile_data<-rbind(tmp_grp_quantile_data,grp_quantile_data)
+          grp2_trials<-dim(subset(real_data,real_data$group==m & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$acc==(l-1)))[1]
+        }else{#if group 3
+          tmp_grp_quantile_data<-quantile_data
+          tmp_grp_quantile_data$quantile<-tmp_grp_quantile_data$quantile+.06 #shift to right for plotting
+          grp_quantile_data<-rbind(tmp_grp_quantile_data,grp_quantile_data)
+          grp3_trials<-dim(subset(real_data,real_data$group==m & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$acc==(l-1)))[1]
+        }
+      }
+      
+      grp_quantile_data$group<-as.factor(grp_quantile_data$group)
+      title<-paste("Model 9 quantile predictions:\ngaze",j," emohead",k," acc",(l-1),sep="")
+      trials_text<-paste("Trials per Group:\n1=",grp1_trials,"  2=",grp2_trials,"  3=",grp3_trials,sep="")
+      
+      #plot quantiles (xaxis against all quantiles. color = "types"; shapes = group)
+      plot<-ggplot(grp_quantile_data, aes(x=quantile, y=rt, color=type)) +
+        geom_errorbar(aes(ymin=hdi_lo,ymax=hdi_hi),width=0,alpha=.7) +
+        geom_point(alpha=.7,aes(shape=group)) +
+        ggtitle(title) +
+        ylab("RT") +
+        xlab("Quantile")+
+        coord_cartesian(ylim = c(0,2500))+ annotate(geom = "text", x = .5, y = 2450, 
+                                              label = trials_text, 
+                                              hjust = "center",
+                                              size=3.5,lineheight=.9)
+      print(plot)
+      
+    }
+  }
+}
+
+# version 2: plot by gaze and head conds but marginalizes over emotion conds 
+for (j in 1:length(gaze_conds)){
+  for (k in 1:length(head_conds)){
+    for (l in 1:length(acc)){
+      for (m in 1:length(groups)){
+        
+        #get list of subjects in this group
+        current_subj_list<-unique(subset(real_data,real_data$group==groups[m])$subjID)
+        
+        #create empty array: #obs x #iterations x #quantiles
+        estim_pred_quantiles_over_subjs <- array(numeric(),c(length(current_subj_list),subsample,length(quantiles))) 
+        estim_real_quantiles_over_subjs <- array(numeric(),c(length(current_subj_list),length(quantiles))) 
+        
+        for (n in 1:length(current_subj_list)){
+          
+          #get real quantiles for this subj, condition,acc
+          tmp_realdata<-subset(real_data,real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_head==k & real_data$acc==(l-1))
+          
+          estim_real_quantiles_over_subjs[n,]<-quantile(tmp_realdata$rt,type=8)
+          
+          #get predicted quantiles (means) and HDI's
+          
+          ## get cols from n_obs that correspond to current cond, subj, acc
+          tmp_quant_cols<-which(real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_head==k & real_data$acc==(l-1))
+          #use those to select observations from the predicted quantiles array
+          tmp_quantile_est<-estim_quantiles[tmp_quant_cols,,]
+          
+          #average estimates over trials for this subject (gives matrix = #subsamples*#quantiles)
+          if(length(tmp_quant_cols)==0){ #if no trials for current condition/subject, create array of NA
+            estim_pred_quantiles_over_subjs[n,,]<-matrix(NA,nrow=subsample,ncol=length(quantiles))
+          }else if(length(tmp_quant_cols)==1){
+            estim_pred_quantiles_over_subjs[n,,]<-tmp_quantile_est
+          }else{ # if subj has 2 or more trials for this cond
+            estim_pred_quantiles_over_subjs[n,,]<-apply(tmp_quantile_est, c(2,3), mean,na.rm=TRUE) 
+          }
+        }
+        
+        for (o in 1:length(quantiles)){
+          
+          tmp_hdi<-HDIofMCMC(estim_pred_quantiles_over_subjs[,,o])
+          tmp_hdi<-data.frame(quantile=quantiles[o],
+                              real_quantile_mean=mean(estim_real_quantiles_over_subjs[,o],na.rm = TRUE),
+                              pred_quantile_mean=mean(estim_pred_quantiles_over_subjs[,,o],na.rm = TRUE)*1000,
+                              hdi_lo=tmp_hdi[1]*1000,
+                              hdi_hi=tmp_hdi[2]*1000)
+          if(o==1){
+            all_hdi<-tmp_hdi
+          }else{
+            all_hdi<-rbind(all_hdi,tmp_hdi)
+          }
+        }
+        
+        #setup data in long form
+        quantile_data<-data.frame(
+          type=c(rep("real",length(quantiles)),rep("pred",length(quantiles))), # type of data (long form)
+          quantile=c(quantiles,quantiles), # quantiles
+          rt=c(all_hdi$real_quantile_mean,all_hdi$pred_quantile_mean), #type of quantile data
+          hdi_lo=c(all_hdi$real_quantile_mean,all_hdi$hdi_lo),
+          hdi_hi=c(all_hdi$real_quantile_mean, all_hdi$hdi_hi))
+        
+        quantile_data$group<-m
+        
+        if(m==1){#if group 1
+          grp_quantile_data<-quantile_data
+          grp1_trials<-dim(subset(real_data,real_data$group==m & real_data$cond==j & real_data$cond_other_head==k & real_data$acc==(l-1)))[1]
+        }else if(m==2){#if group 2
+          tmp_grp_quantile_data<-quantile_data
+          tmp_grp_quantile_data$quantile<-tmp_grp_quantile_data$quantile+.03 #shift slightly to right for plotting
+          grp_quantile_data<-rbind(tmp_grp_quantile_data,grp_quantile_data)
+          grp2_trials<-dim(subset(real_data,real_data$group==m & real_data$cond==j & real_data$cond_other_head==k & real_data$acc==(l-1)))[1]
+        }else{#if group 3
+          tmp_grp_quantile_data<-quantile_data
+          tmp_grp_quantile_data$quantile<-tmp_grp_quantile_data$quantile+.06 #shift slightly to right for plotting
+          grp_quantile_data<-rbind(tmp_grp_quantile_data,grp_quantile_data)
+          grp3_trials<-dim(subset(real_data,real_data$group==m & real_data$cond==j & real_data$cond_other_head==k & real_data$acc==(l-1)))[1]
+        }
+      }
+      grp_quantile_data$group<-as.factor(grp_quantile_data$group)
+      title<-paste("Model 9 quantile predictions:\ngaze",j," head",k," acc",(l-1),sep="")
+      trials_text<-paste("Trials per Group:\n1=",grp1_trials,"  2=",grp2_trials,"  3=",grp3_trials,sep="")
+      
+      #plot quantiles (xaxis against all quantiles colored by "types", shapes vary by group)
+      plot<-ggplot(grp_quantile_data, aes(x=quantile, y=rt, color=type)) +
+        geom_errorbar(aes(ymin=hdi_lo,ymax=hdi_hi),width=0,alpha=.7) +
+        geom_point(alpha=.7,aes(shape=group)) +
+        ggtitle(title) +
+        ylab("RT") +
+        xlab("Quantile")+
+        coord_cartesian(ylim = c(0,2500))+ annotate(geom = "text", x = .5, y = 2450, 
+                                              label = trials_text, 
+                                              hjust = "center",
+                                              size=3.5,lineheight=.9)
+      print(plot)
+    }
+  }
+}
+
+rm(list=c('estim_pred_quantiles_over_subjs','estim_quantiles','posterior','mudata','subdata','sigdata','tmp_quantile_est','tmp_data','tmp_matrix','quantile_data','fit_summary','p','plot','real_data'))
+invisible(gc())
+
+```
+ 
+### Predicted RT Quantiles (Model 10)
+
+```{r id24, echo=FALSE, fig.height=3.5, fig.width=4, message=FALSE, warning=FALSE}
+
+estimated_quantile_file<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/ppc/quantile_estimates_hdi.RData"
+
+#load real observed data
+real_data<-read.csv('/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/data/gaze_beh.csv',header=TRUE) #load real observed data
+real_data$subjID<-match(real_data$subj, unique(real_data$subj)) #subj IDs to sequential indexes 
+
+quantiles<-c(.1,.3,.5,.7,.9)
+groups<-unique(real_data$group)
+subjs<-unique(real_data$subjID)
+gaze_conds<-unique(real_data$cond)
+emo_conds<-unique(real_data$cond_other_emo)
+head_conds<-unique(real_data$cond_other_head)
+emohead_conds<-unique(real_data$cond_other_emo_head)
+acc<-unique(real_data$acc)
+choices<-unique(real_data$choice)
+n_obs<-dim(real_data)[1]
+cores<-10
+
+if(file.exists(estimated_quantile_file)){ #if file exists,load it
+  load(estimated_quantile_file)
+}else{ #if file doesn't exist, run code to estimate quantiles
+
+  load("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/final_fit/stanfit_cmdstan.RData") #load posterior samples
+  posterior<-data.frame(alldata)
+  iterations=dim(posterior)[1] #number of posterwarmup draws
+  
+  rm(alldata)
+  invisible(gc())
+  
+  #setup cluster on computer for parallel processing
+  cluster <- makeCluster(cores) #Leave one core to avoid overload your computer
+  registerDoParallel(cluster)
+
+  # get subj level variables (group and minRT) and subj*cond*choice level varaibles (ie how many trials each subject has for each gaze condition, choice)
+  for (i in 1:length(subjs)){
+    tmpdata<-subset(real_data,real_data$subjID==i)
+    #get min Rt and group for this subj
+    tmp_subj_vars<-data.frame(subj=i,group=unique((tmpdata$group)),minRT=min(tmpdata$rt))
+    if (i==1){
+      subj_vars<-tmp_subj_vars
+    }else{
+      subj_vars<-rbind(subj_vars,tmp_subj_vars)
+    }
+    for (j in 1:length(gaze_conds)){
+      for (k in 1:length(emohead_conds)){
+        for (l in 1:length(choices)){
+          tmpdata<-dim(subset(real_data,real_data$subjID==i & real_data$cond == j & real_data$other_cond_emo_head == k & real_data$choice == l))[1]
+          tmp_cond_vars<-data.frame(subj=i,gaze_cond=j,emohead_cond=k,choice=l,trials=tmpdata)
+          if (i==1 & j==1 & k==1 & l==1){
+            cond_vars<-tmp_cond_vars
+          }else{
+            cond_vars<-rbind(cond_vars,tmp_cond_vars)
+          }
+        }
+      }
+    }
+  }
+
+  #get group level vars
+  for (i in 1:length(groups)){
+    tmpdata<-subset(real_data,real_data$group==i)
+    tmp_group_vars<-data.frame(group=i,maxRT=max(tmpdata$rt))
+    if (i==1){
+      group_vars<-tmp_group_vars
+    }else{
+      group_vars<-rbind(group_vars,tmp_group_vars)
+    }
+  }
+
+  #grab rand draws to subsample from full posterior to make the file size more managable
+  set.seed(42)
+
+  # prepare the posterior samples
+  ## subject parameters
+  sub_alpha_pr_samples<-posterior[,c(grep("sub_alpha_pr", colnames(posterior)))]
+  sub_beta_pr_samples<-posterior[,c(grep("sub_beta_pr", colnames(posterior)))]
+  sub_delta_present1_pr_samples<-posterior[,c(grep("sub_delta_present_pr", colnames(posterior)))][,1:100]
+  sub_delta_present2_pr_samples<-posterior[,c(grep("sub_delta_present_pr", colnames(posterior)))][,101:200]
+  sub_delta_present3_pr_samples<-posterior[,c(grep("sub_delta_present_pr", colnames(posterior)))][,201:300]
+  sub_delta_present4_pr_samples<-posterior[,c(grep("sub_delta_present_pr", colnames(posterior)))][,301:400]
+  sub_delta_absent1_pr_samples<-posterior[,c(grep("sub_delta_absent_pr", colnames(posterior)))][,1:100]
+  sub_delta_absent2_pr_samples<-posterior[,c(grep("sub_delta_absent_pr", colnames(posterior)))][,101:200]
+  sub_delta_absent3_pr_samples<-posterior[,c(grep("sub_delta_absent_pr", colnames(posterior)))][,201:300]
+  sub_delta_absent4_pr_samples<-posterior[,c(grep("sub_delta_absent_pr", colnames(posterior)))][,301:400]
+  sub_ndt_pr_samples<-posterior[,c(grep("sub_ndt_pr", colnames(posterior)))]
+
+  ## group parameters (means)
+  mu_grp_alpha_pr_samples<-posterior[,c(grep("mu_grp_alpha_pr", colnames(posterior)))]
+  mu_grp_beta_pr_samples<-posterior[,c(grep("mu_grp_beta_pr", colnames(posterior)))]
+  mu_grp_delta_present_pr_samples<-posterior[,c(grep("mu_grp_delta_present_pr", colnames(posterior)))]
+  mu_grp_delta_absent_pr_samples<-posterior[,c(grep("mu_grp_delta_absent_pr", colnames(posterior)))]
+  mu_grp_ndt_pr_samples<-posterior[,c(grep("mu_grp_ndt_pr", colnames(posterior)))]
+
+  ## group parameters (variances)
+  sig_grp_alpha_pr_samples<-posterior[,c(grep("sig_grp_alpha_pr", colnames(posterior)))]
+  sig_grp_beta_pr_samples<-posterior[,c(grep("sig_grp_beta_pr", colnames(posterior)))]
+  sig_grp_delta_pr_samples<-posterior[,c(grep("sig_grp_delta_pr", colnames(posterior)))]
+  sig_grp_ndt_pr_samples<-posterior[,c(grep("sig_grp_ndt_pr", colnames(posterior)))]
+
+  ## other condition parameters (group level effect; 2x emo conditions)
+  cond_delta1_pr_samples<-(posterior[,c(grep("cond_delta_pr", colnames(posterior)))])[,1:3]
+  cond_delta2_pr_samples<-(posterior[,c(grep("cond_delta_pr", colnames(posterior)))])[,4:6]
+  cond_delta3_pr_samples<-(posterior[,c(grep("cond_delta_pr", colnames(posterior)))])[,7:9]
+  cond_delta4_pr_samples<-(posterior[,c(grep("cond_delta_pr", colnames(posterior)))])[,10:12]
+
+  subsample<-1000 #how many draws should we randomly subsample from the full posterior
+
+  #create empty array for rt quantiles: #obs x #subsampled iterations x #quantiles
+  estim_quantiles <- array(numeric(),c(n_obs,subsample,length(quantiles)))
+  #create empty array for predicted choice proportions: #obs x #subsampled iterations
+  estim_choice_props <- array(numeric(),c(n_obs,subsample))
+  
+  for (k in 1:n_obs){
+    tmp_subj<-real_data$subjID[k]
+    tmp_group<-real_data$group[k]
+    tmp_gazecond<-real_data$cond[k]
+    tmp_emoheadcond<-real_data$cond_other_emo_head[k]
+    tmp_choice<-real_data$choice[k]
+    tmp_minRT<-subj_vars$minRT[tmp_subj] #get this subj's min RT
+
+    #rand subsample
+    rand_draws<-sample(seq(from=1,to=iterations,by=1),subsample)
+
+    #randomly draw group mean, variance values
+    tmp_mu_grp_alpha_pr<-as.numeric(unlist(mu_grp_alpha_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_beta_pr<-as.numeric(unlist(mu_grp_beta_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_delta_present_pr<-as.numeric(unlist(mu_grp_delta_present_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_delta_absent_pr<-as.numeric(unlist(mu_grp_delta_absent_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_ndt_pr<-as.numeric(unlist(mu_grp_ndt_pr_samples[rand_draws,tmp_group]))
+
+    tmp_sig_grp_alpha_pr<-as.numeric(unlist(sig_grp_alpha_pr_samples[rand_draws,tmp_group]))
+    tmp_sig_grp_beta_pr<-as.numeric(unlist(sig_grp_beta_pr_samples[rand_draws,tmp_group]))
+    tmp_sig_grp_delta_pr<-as.numeric(unlist(sig_grp_delta_pr_samples[rand_draws,tmp_group]))
+    tmp_sig_grp_ndt_pr<-as.numeric(unlist(sig_grp_ndt_pr_samples[rand_draws,tmp_group]))
+
+    # randomly draw condition level values
+    tmp_cond_delta1_pr<-as.numeric(unlist(cond_delta1_pr_samples[rand_draws,tmp_group]))
+    tmp_cond_delta2_pr<-as.numeric(unlist(cond_delta2_pr_samples[rand_draws,tmp_group]))
+    tmp_cond_delta3_pr<-as.numeric(unlist(cond_delta3_pr_samples[rand_draws,tmp_group]))
+    tmp_cond_delta4_pr<-as.numeric(unlist(cond_delta4_pr_samples[rand_draws,tmp_group]))
+
+    #draw subj level values
+    tmp_sub_alpha_pr<-as.numeric(unlist(sub_alpha_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_beta_pr<-as.numeric(unlist(sub_beta_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_present1_pr<-as.numeric(unlist(sub_delta_present1_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_present2_pr<-as.numeric(unlist(sub_delta_present2_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_present3_pr<-as.numeric(unlist(sub_delta_present3_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_present4_pr<-as.numeric(unlist(sub_delta_present4_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_absent1_pr<-as.numeric(unlist(sub_delta_absent1_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_absent2_pr<-as.numeric(unlist(sub_delta_absent2_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_absent3_pr<-as.numeric(unlist(sub_delta_absent3_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_absent4_pr<-as.numeric(unlist(sub_delta_absent4_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_ndt_pr<-as.numeric(unlist(sub_ndt_pr_samples[rand_draws,tmp_subj]))
+
+    # do transformations for non centered parameterization (scale raw subject par by group mean and variance)
+    tmp_alpha<-pnorm(tmp_mu_grp_alpha_pr + tmp_sub_alpha_pr*tmp_sig_grp_alpha_pr)*3.9+0.1
+    tmp_beta<-pnorm(tmp_mu_grp_beta_pr + tmp_sub_beta_pr*tmp_sig_grp_beta_pr)
+    tmp_delta_present1<-pnorm(tmp_mu_grp_delta_present_pr + tmp_sub_delta_present1_pr*tmp_sig_grp_delta_pr+tmp_cond_delta1_pr)*8-4
+    tmp_delta_present2<-pnorm(tmp_mu_grp_delta_present_pr + tmp_sub_delta_present2_pr*tmp_sig_grp_delta_pr+tmp_cond_delta2_pr)*8-4
+    tmp_delta_present3<-pnorm(tmp_mu_grp_delta_present_pr + tmp_sub_delta_present3_pr*tmp_sig_grp_delta_pr+tmp_cond_delta3_pr)*8-4
+    tmp_delta_present4<-pnorm(tmp_mu_grp_delta_present_pr + tmp_sub_delta_present4_pr*tmp_sig_grp_delta_pr+tmp_cond_delta4_pr)*8-4
+    tmp_delta_absent1<-pnorm(tmp_mu_grp_delta_absent_pr + tmp_sub_delta_absent1_pr*tmp_sig_grp_delta_pr+tmp_cond_delta1_pr)*8-4
+    tmp_delta_absent2<-pnorm(tmp_mu_grp_delta_absent_pr + tmp_sub_delta_absent2_pr*tmp_sig_grp_delta_pr+tmp_cond_delta2_pr)*8-4
+    tmp_delta_absent3<-pnorm(tmp_mu_grp_delta_absent_pr + tmp_sub_delta_absent3_pr*tmp_sig_grp_delta_pr+tmp_cond_delta3_pr)*8-4
+    tmp_delta_absent4<-pnorm(tmp_mu_grp_delta_absent_pr + tmp_sub_delta_absent4_pr*tmp_sig_grp_delta_pr+tmp_cond_delta4_pr)*8-4
+    tmp_ndt<-(pnorm(tmp_mu_grp_ndt_pr + tmp_sub_ndt_pr*tmp_sig_grp_ndt_pr)*tmp_minRT*0.9)/1000
+
+    if(tmp_gazecond==1){#if gaze=direct
+      if(tmp_choice==1){#if choice =YES (correct)
+        resp<-"upper" #will use this variable for RWiener cdf function (pwiener) below)
+        tmp_beta1<-tmp_beta
+        if(tmp_emoheadcond==1){
+          tmp_delta_cond<-tmp_delta_present1
+        }else if(tmp_emoheadcond==2){
+          tmp_delta_cond<-tmp_delta_present2
+        }else if(tmp_emoheadcond==3){
+          tmp_delta_cond<-tmp_delta_present3
+        }else if(tmp_emoheadcond==4){
+          tmp_delta_cond<-tmp_delta_present4
+        }
+      }else{#if choice=NO (incorrect)
+        resp<-"lower"
+        tmp_beta1<-tmp_beta #im deliberately NOT flipping the beta here (1-beta) like i would usually bc qwiener func does this internally based on the resp specified
+        if(tmp_emoheadcond==1){
+          tmp_delta_cond<-tmp_delta_present1 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else if(tmp_emoheadcond==2){
+          tmp_delta_cond<-tmp_delta_present2 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else if(tmp_emoheadcond==3){
+          tmp_delta_cond<-tmp_delta_present3 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else if(tmp_emoheadcond==4){
+          tmp_delta_cond<-tmp_delta_present4 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }
+      }
+    }else{ #if gaze=indirect
+      if(tmp_choice==1){#if choice=YES (incorrect)
+        resp<-"upper"
+        tmp_beta1<-tmp_beta
+        if(tmp_emoheadcond==1){
+          tmp_delta_cond<-tmp_delta_absent1 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else if(tmp_emoheadcond==2){
+          tmp_delta_cond<-tmp_delta_absent2
+        }else if(tmp_emoheadcond==3){
+          tmp_delta_cond<-tmp_delta_absent3
+        }else if(tmp_emoheadcond==4){
+          tmp_delta_cond<-tmp_delta_absent4
+        }
+      }else{#if choice=NO (correct)
+        resp<-"lower"
+        tmp_beta1<-tmp_beta #im deliberately NOT flipping the beta here (1-beta) like i would usually bc qwiener func does this internally based on the resp specified
+        if(tmp_emoheadcond==1){
+          tmp_delta_cond<-tmp_delta_absent1 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else if(tmp_emoheadcond==2){
+          tmp_delta_cond<-tmp_delta_absent2
+        }else if(tmp_emoheadcond==3){
+          tmp_delta_cond<-tmp_delta_absent3
+        }else if(tmp_emoheadcond==4){
+          tmp_delta_cond<-tmp_delta_absent4
+        }
+      }
+    }
+
+    #define some variables that we will use to calculate the choice probs below
+    sigma<-1 #diffusion coefficient. fixed at 1
+
+    qc<-foreach(l=1:length(tmp_alpha),.combine='rbind',.packages = c("RWiener","dplyr")) %dopar% {
+
+      #calculate choice probabilities (needed to dead with defective CDF)
+      ## calc absolute start point
+      z<-tmp_alpha[l]*tmp_beta1[l]
+
+      boundary<-1 #1=upper, 0=lower
+      m<-1 #iteration tracker
+      tinc<-.01 #time increment
+      t<-c(tinc+tmp_ndt[l]) #ndt plus some tolerance
+      looking<-1 #status of routine within while statement
+      pt<-c(NA)
+
+      ## calculate choice probabilities for current trial, parameters (whether it's upper or lower depends on observed choice of current trial)
+      if(tmp_choice==1){#if upper bound response, calculate prob of upper bound resp
+        tmp_choice_prob <- (exp(2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2) - exp(2*tmp_delta_cond[l]*(tmp_alpha[l]-z)/sigma^2))/(exp(2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2)-1)
+      }else{#if lower bound response, calculate prob of lower bound resp
+        tmp_choice_prob <- (exp(-2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2) - exp(-2*tmp_delta_cond[l]*z/sigma^2))/(exp(-2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2)-1)
+      }
+
+      #loop thru all samples, calculating + fixing defective cdf, and terminating when prob from fixed CDF exceeds .9 + .01
+      while (looking==1){
+        #calculate DEFECTIVE cdf for the response given on this trial
+
+        #im deliberately making rt here tinc+tmp_ndt bc the rwiener function subtracts out the ndt from the rt for us
+        pt[m]<-pwiener(t[m],tmp_alpha[l],tmp_ndt[l],tmp_beta1[l],tmp_delta_cond[l],resp)
+        #fix the defective CDF (by dividing current prob value by the prob of the current choice
+        pt[m]<-(pt[m])/tmp_choice_prob
+        test<-as.numeric(pt>max(quantiles)+.01)
+        looking<-as.numeric(sum(test)<2)
+        m<-m+1
+        t[m]<-t[m-1]+tinc
+      }
+      qc<-c(NA)
+      for (n in 1:length(quantiles)){
+        o <- last(which(pt<=quantiles[n]))
+        if (length(o)>0){#if it's not empty
+          qc[n] <- (t[o+1] - t[o])*(quantiles[n]-pt[o])/(pt[o+1]-pt[o]) + t[o]
+        }else{
+          qc[n] <- tmp_ndt[l]
+        }
+      }
+      return(qc)
+    }
+
+    estim_quantiles[k,,]<-qc
+
+    #save quantile estimates every 1000 observations (in case things crash)
+    if(as.numeric(endsWith(as.character(unlist(k)), "000"))==1){
+      fitdir<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/ppc/"
+      fitname<-paste(fitdir,"quantile_estimates_hdi",".RData",sep = "")
+      save(estim_quantiles, file = fitname)
+      print("saving data processed to this point")
+    }
+    invisible(gc())
+    print(k)
+  }
+
+  # save full estimated quantile data to .RData file
+  fitdir<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/ppc/"
+  fitname<-paste(fitdir,"quantile_estimates_hdi",".RData",sep = "")
+  save(estim_quantiles, file = fitname)
+
+  parallel::stopCluster(cl = cluster)
+
+}
+
+###############################################################################
+# average predictions across subjects for each condition, choice, acc
+###############################################################################
+
+subsample<-1000
+
+#version1: plots across all conds (gaze, emo, head) separately
+for (j in 1:length(gaze_conds)){
+  for (k in 1:length(emohead_conds)){
+    for (l in 1:length(acc)){
+      for (m in 1:length(groups)){
+        
+        #get list of subjects in this group
+        current_subj_list<-unique(subset(real_data,real_data$group==groups[m])$subjID)
+        
+        #create empty array: #obs x #iterations x #quantiles
+        estim_pred_quantiles_over_subjs <- array(numeric(),c(length(current_subj_list),subsample,length(quantiles))) 
+        estim_real_quantiles_over_subjs <- array(numeric(),c(length(current_subj_list),length(quantiles))) 
+        
+        for (n in 1:length(current_subj_list)){
+          
+          #get real quantiles for this subj, condition,acc
+          tmp_realdata<-subset(real_data,real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$acc==(l-1))
+          
+          estim_real_quantiles_over_subjs[n,]<-quantile(tmp_realdata$rt,type=8)
+          
+          #get predicted quantiles (means) and HDI's
+          
+          ## get cols from n_obs that correspond to current cond, subj, acc
+          tmp_quant_cols<-which(real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$acc==(l-1))
+          #use those to select observations from the predicted quantiles array
+          tmp_quantile_est<-estim_quantiles[tmp_quant_cols,,]
+          
+          #average estimates over trials for this subject (gives matrix = #subsamples*#quantiles)
+          if(length(tmp_quant_cols)==0){ #if no trials for current condition for current subject, create array of NA
+            estim_pred_quantiles_over_subjs[n,,]<-matrix(NA,nrow=subsample,ncol=length(quantiles))
+          }else if(length(tmp_quant_cols)==1){
+            estim_pred_quantiles_over_subjs[n,,]<-tmp_quantile_est
+          }else{ # if subj has 2 or more trials for this cond
+            estim_pred_quantiles_over_subjs[n,,]<-apply(tmp_quantile_est, c(2,3), mean,na.rm=TRUE) 
+          }
+        }
+        
+        for (o in 1:length(quantiles)){
+          
+          tmp_hdi<-HDIofMCMC(estim_pred_quantiles_over_subjs[,,o])
+          tmp_hdi<-data.frame(quantile=quantiles[o],
+                              real_quantile_mean=mean(estim_real_quantiles_over_subjs[,o],na.rm = TRUE),
+                              pred_quantile_mean=mean(estim_pred_quantiles_over_subjs[,,o],na.rm = TRUE)*1000,
+                              hdi_lo=tmp_hdi[1]*1000,
+                              hdi_hi=tmp_hdi[2]*1000)
+          if(o==1){
+            all_hdi<-tmp_hdi
+          }else{
+            all_hdi<-rbind(all_hdi,tmp_hdi)
+          }
+        }
+        
+        #setup data in long form
+        quantile_data<-data.frame(
+          type=c(rep("real",length(quantiles)),rep("pred",length(quantiles))), # type of data (long form)
+          quantile=c(quantiles,quantiles), # quantiles
+          rt=c(all_hdi$real_quantile_mean,all_hdi$pred_quantile_mean), #type of quantile data
+          hdi_lo=c(all_hdi$real_quantile_mean,all_hdi$hdi_lo),
+          hdi_hi=c(all_hdi$real_quantile_mean, all_hdi$hdi_hi))
+        
+        quantile_data$group<-m
+        
+        if(m==1){#if group 1
+          grp_quantile_data<-quantile_data
+          grp1_trials<-dim(subset(real_data,real_data$group==m & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$acc==(l-1)))[1]
+        }else if(m==2){#if group 2
+          tmp_grp_quantile_data<-quantile_data
+          tmp_grp_quantile_data$quantile<-tmp_grp_quantile_data$quantile+.03 #shift slightly to right for plotting
+          grp_quantile_data<-rbind(tmp_grp_quantile_data,grp_quantile_data)
+          grp2_trials<-dim(subset(real_data,real_data$group==m & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$acc==(l-1)))[1]
+        }else{#if group 3
+          tmp_grp_quantile_data<-quantile_data
+          tmp_grp_quantile_data$quantile<-tmp_grp_quantile_data$quantile+.06 #shift slightly to right for plotting
+          grp_quantile_data<-rbind(tmp_grp_quantile_data,grp_quantile_data)
+          grp3_trials<-dim(subset(real_data,real_data$group==m & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$acc==(l-1)))[1]
+        }
+      }
+      grp_quantile_data$group<-as.factor(grp_quantile_data$group)
+      title<-paste("Model 10 quantile predictions:\ngaze",j," emohead",k," acc",(l-1),sep="")
+      trials_text<-paste("Trials per Group:\n1=",grp1_trials,"  2=",grp2_trials,"  3=",grp3_trials,sep="")
+      
+      #plot quantiles (xaxis against all quantiles colored by "types", shapes vary by group)
+      plot<-ggplot(grp_quantile_data, aes(x=quantile, y=rt, color=type)) +
+        geom_errorbar(aes(ymin=hdi_lo,ymax=hdi_hi),width=0,alpha=.7) +
+        geom_point(alpha=.7,aes(shape=group)) +
+        ggtitle(title) +
+        ylab("RT") +
+        xlab("Quantile")+
+        coord_cartesian(ylim = c(0,2500))+ annotate(geom = "text", x = .5, y = 2450, 
+                                              label = trials_text, 
+                                              hjust = "center",
+                                              size=3.5,lineheight=.9)
+      print(plot)
+    }
+  }
+}
+
+# version 2: plot by gaze and head conds but marginalizes over emotion conds 
+for (j in 1:length(gaze_conds)){
+  for (k in 1:length(head_conds)){
+    for (l in 1:length(acc)){
+      for (m in 1:length(groups)){
+        
+        #get list of subjects in this group
+        current_subj_list<-unique(subset(real_data,real_data$group==groups[m])$subjID)
+        
+        #create empty array: #obs x #iterations x #quantiles
+        estim_pred_quantiles_over_subjs <- array(numeric(),c(length(current_subj_list),subsample,length(quantiles))) 
+        estim_real_quantiles_over_subjs <- array(numeric(),c(length(current_subj_list),length(quantiles))) 
+        
+        for (n in 1:length(current_subj_list)){
+          
+          #get real quantiles for this subj, condition,acc
+          tmp_realdata<-subset(real_data,real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_head==k & real_data$acc==(l-1))
+          
+          estim_real_quantiles_over_subjs[n,]<-quantile(tmp_realdata$rt,type=8)
+          
+          #get predicted quantiles (means) and HDI's
+          
+          ## get cols from n_obs that correspond to current cond, subj, acc
+          tmp_quant_cols<-which(real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_head==k & real_data$acc==(l-1))
+          #use those to select observations from the predicted quantiles array
+          tmp_quantile_est<-estim_quantiles[tmp_quant_cols,,]
+          
+          #average estimates over trials for this subject (gives matrix = #subsamples*#quantiles)
+          if(length(tmp_quant_cols)==0){ #if no trials for current condition for current subject, create array of NA
+            estim_pred_quantiles_over_subjs[n,,]<-matrix(NA,nrow=subsample,ncol=length(quantiles))
+          }else if(length(tmp_quant_cols)==1){
+            estim_pred_quantiles_over_subjs[n,,]<-tmp_quantile_est
+          }else{ # if subj has 2 or more trials for this cond
+            estim_pred_quantiles_over_subjs[n,,]<-apply(tmp_quantile_est, c(2,3), mean,na.rm=TRUE) 
+          }
+        }
+        
+        for (o in 1:length(quantiles)){
+          
+          tmp_hdi<-HDIofMCMC(estim_pred_quantiles_over_subjs[,,o])
+          tmp_hdi<-data.frame(quantile=quantiles[o],
+                              real_quantile_mean=mean(estim_real_quantiles_over_subjs[,o],na.rm = TRUE),
+                              pred_quantile_mean=mean(estim_pred_quantiles_over_subjs[,,o],na.rm = TRUE)*1000,
+                              hdi_lo=tmp_hdi[1]*1000,
+                              hdi_hi=tmp_hdi[2]*1000)
+          if(o==1){
+            all_hdi<-tmp_hdi
+          }else{
+            all_hdi<-rbind(all_hdi,tmp_hdi)
+          }
+        }
+        
+        #setup data in long form
+        quantile_data<-data.frame(
+          type=c(rep("real",length(quantiles)),rep("pred",length(quantiles))), # type of data (long form)
+          quantile=c(quantiles,quantiles), # quantiles
+          rt=c(all_hdi$real_quantile_mean,all_hdi$pred_quantile_mean), #type of quantile data
+          hdi_lo=c(all_hdi$real_quantile_mean,all_hdi$hdi_lo),
+          hdi_hi=c(all_hdi$real_quantile_mean, all_hdi$hdi_hi))
+        
+        quantile_data$group<-m
+        
+        if(m==1){#if group 1
+          grp_quantile_data<-quantile_data
+          grp1_trials<-dim(subset(real_data,real_data$group==m & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$acc==(l-1)))[1]
+        }else if(m==2){#if group 2
+          tmp_grp_quantile_data<-quantile_data
+          tmp_grp_quantile_data$quantile<-tmp_grp_quantile_data$quantile+.03 #shift slightly to right for plotting
+          grp_quantile_data<-rbind(tmp_grp_quantile_data,grp_quantile_data)
+          grp2_trials<-dim(subset(real_data,real_data$group==m & real_data$cond==j & real_data$cond_other_head==k & real_data$acc==(l-1)))[1]
+        }else{#if group 3
+          tmp_grp_quantile_data<-quantile_data
+          tmp_grp_quantile_data$quantile<-tmp_grp_quantile_data$quantile+.06 #shift slightly to right for plotting
+          grp_quantile_data<-rbind(tmp_grp_quantile_data,grp_quantile_data)
+          grp3_trials<-dim(subset(real_data,real_data$group==m & real_data$cond==j & real_data$cond_other_head==k & real_data$acc==(l-1)))[1]
+        }
+      }
+      grp_quantile_data$group<-as.factor(grp_quantile_data$group)
+      title<-paste("Model 10 quantile predictions:\ngaze",j," head",k," acc",(l-1),sep="")
+      trials_text<-paste("Trials per Group:\n1=",grp1_trials,"  2=",grp2_trials,"  3=",grp3_trials,sep="")
+      
+      #plot quantiles (xaxis against all quantiles colored by "types", shapes vary by group)
+      plot<-ggplot(grp_quantile_data, aes(x=quantile, y=rt, color=type)) +
+        geom_errorbar(aes(ymin=hdi_lo,ymax=hdi_hi),width=0,alpha=.7) +
+        geom_point(alpha=.7,aes(shape=group)) +
+        ggtitle(title) +
+        ylab("RT") +
+        xlab("Quantile")+
+        coord_cartesian(ylim = c(0,2500))+ annotate(geom = "text", x = .5, y = 2450, 
+                                              label = trials_text, 
+                                              hjust = "center",
+                                              size=3.5,lineheight=.9)
+      print(plot)
+    }
+  }
+}
+
+rm(list=c('estim_pred_quantiles_over_subjs','estim_quantiles','posterior','mudata','subdata','sigdata','tmp_quantile_est','tmp_data','tmp_matrix','quantile_data','fit_summary','p','plot','real_data'))
+invisible(gc())
+
+```
+ 
+## Posterior Predicted Choice Proportions 
+
+### Predicted Choice Proportions (Model 9)
+
+Predictions look good except for the larger variability of gazecond1 (direct) + headcond2 (indirect) for all 3 groups. But this large variability actually maps onto the observed SD of accuracy in these conditions.
+
+```{r id25, echo=FALSE, fig.height=9, fig.width=4.5, message=FALSE, warning=FALSE, fig.show="hold"}
+
+estimated_choiceprops_file<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m9/ppc/choice_prop_estimates_hdi.RData"
+
+#load real observed data
+real_data<-read.csv('/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/data/gaze_beh.csv',header=TRUE) #load real observed data
+real_data$subjID<-match(real_data$subj, unique(real_data$subj)) #subj IDs to sequential indexes 
+
+quantiles<-c(.1,.3,.5,.7,.9)
+groups<-unique(real_data$group)
+subjs<-unique(real_data$subjID)
+gaze_conds<-unique(real_data$cond)
+emo_conds<-unique(real_data$cond_other_emo)
+head_conds<-unique(real_data$cond_other_head)
+emohead_conds<-unique(real_data$cond_other_emo_head)
+choices<-unique(real_data$choice)
+acc<-unique(real_data$acc)
+n_obs<-dim(real_data)[1]
+cores<-10
+
+if(file.exists(estimated_choiceprops_file)){ #if file exists,load it
+  load(estimated_choiceprops_file)
+}else{ #if file doesn't exist, run code to estimate quantiles
+  
+  load("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m9/final_fit/stanfit_cmdstan.RData") #load posterior samples
+  iterations=dim(alldata)[1] #number of posterwarmup draws
+  posterior<-data.frame(alldata)
+  
+  rm(alldata)
+  invisible(gc())
+  
+  #setup cluster on computer for parallel processing
+  cluster <- makeCluster(cores) #Leave one core to avoid overload your computer
+  registerDoParallel(cluster)
+  
+  # get subj level variables (group and minRT) and subj*cond*choice level varaibles (ie how many trials each subject has for each gaze condition, choice)
+  for (i in 1:length(subjs)){
+    tmpdata<-subset(real_data,real_data$subjID==i) 
+    #get min Rt and group for this subj
+    tmp_subj_vars<-data.frame(subj=i,group=unique((tmpdata$group)),minRT=min(tmpdata$rt))
+    if (i==1){
+      subj_vars<-tmp_subj_vars
+    }else{
+      subj_vars<-rbind(subj_vars,tmp_subj_vars)
+    }
+    for (j in 1:length(gaze_conds)){
+      for (k in 1:length(head_conds)){
+        for (l in 1:length(choices)){
+          tmpdata<-dim(subset(real_data,real_data$subjID==i & real_data$cond == j & real_data$other_cond_head == k & real_data$choice == l))[1]
+          tmp_cond_vars<-data.frame(subj=i,gaze_cond=j,head_cond=k,choice=l,trials=tmpdata)
+          if (i==1 & j==1 & k==1 & l==1){
+            cond_vars<-tmp_cond_vars
+          }else{
+            cond_vars<-rbind(cond_vars,tmp_cond_vars)
+          }
+        }
+      }
+    }
+  }
+  
+  #get group level vars
+  for (i in 1:length(groups)){
+    tmpdata<-subset(real_data,real_data$group==i)
+    tmp_group_vars<-data.frame(group=i,maxRT=max(tmpdata$rt))
+    if (i==1){
+      group_vars<-tmp_group_vars
+    }else{
+      group_vars<-rbind(group_vars,tmp_group_vars)
+    }
+  }
+  
+  #grab rand draws to subsample from full posterior to make the file size more managable
+  set.seed(42)
+  
+  # prepare the posterior samples
+  ## subject parameters
+  sub_alpha_pr_samples<-posterior[,c(grep("sub_alpha_pr", colnames(posterior)))]
+  sub_beta_pr_samples<-posterior[,c(grep("sub_beta_pr", colnames(posterior)))] 
+  sub_delta_present1_pr_samples<-posterior[,c(grep("sub_delta_present_pr", colnames(posterior)))][,1:100]
+  sub_delta_present2_pr_samples<-posterior[,c(grep("sub_delta_present_pr", colnames(posterior)))][,101:200] 
+  sub_delta_absent1_pr_samples<-posterior[,c(grep("sub_delta_absent_pr", colnames(posterior)))][,1:100]
+  sub_delta_absent2_pr_samples<-posterior[,c(grep("sub_delta_absent_pr", colnames(posterior)))][,101:200]
+  sub_ndt_pr_samples<-posterior[,c(grep("sub_ndt_pr", colnames(posterior)))] 
+  
+  ## group parameters (means)
+  mu_grp_alpha_pr_samples<-posterior[,c(grep("mu_grp_alpha_pr", colnames(posterior)))] 
+  mu_grp_beta_pr_samples<-posterior[,c(grep("mu_grp_beta_pr", colnames(posterior)))] 
+  mu_grp_delta_present_pr_samples<-posterior[,c(grep("mu_grp_delta_present_pr", colnames(posterior)))] 
+  mu_grp_delta_absent_pr_samples<-posterior[,c(grep("mu_grp_delta_absent_pr", colnames(posterior)))] 
+  mu_grp_ndt_pr_samples<-posterior[,c(grep("mu_grp_ndt_pr", colnames(posterior)))] 
+  
+  ## group parameters (variances)
+  sig_grp_alpha_pr_samples<-posterior[,c(grep("sig_grp_alpha_pr", colnames(posterior)))] 
+  sig_grp_beta_pr_samples<-posterior[,c(grep("sig_grp_beta_pr", colnames(posterior)))] 
+  sig_grp_delta_pr_samples<-posterior[,c(grep("sig_grp_delta_pr", colnames(posterior)))] 
+  sig_grp_ndt_pr_samples<-posterior[,c(grep("sig_grp_ndt_pr", colnames(posterior)))] 
+  
+  ## other condition parameters (group level effect; 2x emo conditions)
+  cond_delta1_pr_samples<-(posterior[,c(grep("cond_delta_pr", colnames(posterior)))])[,1:3]
+  cond_delta2_pr_samples<-(posterior[,c(grep("cond_delta_pr", colnames(posterior)))])[,4:6]
+  
+  subsample<-1000 #how many draws should we randomly subsample from the full posterior 
+  
+  #create empty array for predicted choice proportions: #obs x #subsampled iterations
+  estim_choice_props <- array(numeric(),c(n_obs,subsample)) 
+  
+  for (k in 1:n_obs){
+    tmp_subj<-real_data$subjID[k]
+    tmp_group<-real_data$group[k]
+    tmp_gazecond<-real_data$cond[k]
+    tmp_headcond<-real_data$cond_other_head[k]
+    tmp_choice<-real_data$choice[k]
+    tmp_minRT<-subj_vars$minRT[tmp_subj] #get this subj's min RT
+    
+    #rand subsample
+    rand_draws<-sample(seq(from=1,to=iterations,by=1),subsample)
+    
+    #randomly draw group mean, variance values 
+    tmp_mu_grp_alpha_pr<-as.numeric(unlist(mu_grp_alpha_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_beta_pr<-as.numeric(unlist(mu_grp_beta_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_delta_present_pr<-as.numeric(unlist(mu_grp_delta_present_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_delta_absent_pr<-as.numeric(unlist(mu_grp_delta_absent_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_ndt_pr<-as.numeric(unlist(mu_grp_ndt_pr_samples[rand_draws,tmp_group]))
+    
+    tmp_sig_grp_alpha_pr<-as.numeric(unlist(sig_grp_alpha_pr_samples[rand_draws,tmp_group]))
+    tmp_sig_grp_beta_pr<-as.numeric(unlist(sig_grp_beta_pr_samples[rand_draws,tmp_group]))
+    tmp_sig_grp_delta_pr<-as.numeric(unlist(sig_grp_delta_pr_samples[rand_draws,tmp_group]))
+    tmp_sig_grp_ndt_pr<-as.numeric(unlist(sig_grp_ndt_pr_samples[rand_draws,tmp_group]))
+    
+    # randomly draw condition level values
+    tmp_cond_delta1_pr<-as.numeric(unlist(cond_delta1_pr_samples[rand_draws,tmp_group]))
+    tmp_cond_delta2_pr<-as.numeric(unlist(cond_delta2_pr_samples[rand_draws,tmp_group]))
+    
+    #draw subj level values
+    tmp_sub_alpha_pr<-as.numeric(unlist(sub_alpha_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_beta_pr<-as.numeric(unlist(sub_beta_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_present1_pr<-as.numeric(unlist(sub_delta_present1_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_present2_pr<-as.numeric(unlist(sub_delta_present2_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_absent1_pr<-as.numeric(unlist(sub_delta_absent1_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_absent2_pr<-as.numeric(unlist(sub_delta_absent2_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_ndt_pr<-as.numeric(unlist(sub_ndt_pr_samples[rand_draws,tmp_subj]))
+    
+    # do transformations for non centered parameterization (scale raw subject par by group mean and variance)
+    tmp_alpha<-pnorm(tmp_mu_grp_alpha_pr + tmp_sub_alpha_pr*tmp_sig_grp_alpha_pr)*3.9+0.1
+    tmp_beta<-pnorm(tmp_mu_grp_beta_pr + tmp_sub_beta_pr*tmp_sig_grp_beta_pr)
+    tmp_delta_present1<-pnorm(tmp_mu_grp_delta_present_pr + tmp_sub_delta_present1_pr*tmp_sig_grp_delta_pr+tmp_cond_delta1_pr)*8-4
+    tmp_delta_present2<-pnorm(tmp_mu_grp_delta_present_pr + tmp_sub_delta_present2_pr*tmp_sig_grp_delta_pr+tmp_cond_delta2_pr)*8-4
+    tmp_delta_absent1<-pnorm(tmp_mu_grp_delta_absent_pr + tmp_sub_delta_absent1_pr*tmp_sig_grp_delta_pr+tmp_cond_delta1_pr)*8-4
+    tmp_delta_absent2<-pnorm(tmp_mu_grp_delta_absent_pr + tmp_sub_delta_absent2_pr*tmp_sig_grp_delta_pr+tmp_cond_delta2_pr)*8-4
+    tmp_ndt<-(pnorm(tmp_mu_grp_ndt_pr + tmp_sub_ndt_pr*tmp_sig_grp_ndt_pr)*tmp_minRT*0.9)/1000
+    
+    if(tmp_gazecond==1){#if gaze=direct
+      if(tmp_choice==1){#if choice =YES (correct)
+        resp<-"upper" #will use this variable for RWiener cdf function (pwiener) below)
+        tmp_beta1<-tmp_beta
+        if(tmp_headcond==1){#if head = forward
+          tmp_delta_cond<-tmp_delta_present1
+        }else{#if head = deviated
+          tmp_delta_cond<-tmp_delta_present2
+        }
+      }else{#if choice=NO (incorrect)
+        resp<-"lower"
+        tmp_beta1<-tmp_beta #im deliberately NOT flipping the beta here (1-beta) like i would usually bc qwiener func does this internally based on the resp specified
+        if(tmp_headcond==1){#if head = forward
+          tmp_delta_cond<-tmp_delta_present1 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else{#if head = deviated
+          tmp_delta_cond<-tmp_delta_present2 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }
+      }
+    }else{ #if gaze=indirect
+      if(tmp_choice==1){#if choice=YES (incorrect)
+        resp<-"upper"
+        tmp_beta1<-tmp_beta
+        if(tmp_headcond==1){#if head = forward
+          tmp_delta_cond<-tmp_delta_absent1 
+        }else{#if head = deviated
+          tmp_delta_cond<-tmp_delta_absent2 
+        }
+      }else{#if choice=NO (correct)
+        resp<-"lower"
+        tmp_beta1<-tmp_beta #im deliberately NOT flipping the beta here (1-beta) like i would usually bc qwiener func does this internally based on the resp specified
+        if(tmp_headcond==1){#if head = forward
+          tmp_delta_cond<-tmp_delta_absent1 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else{#if head = deviated
+          tmp_delta_cond<-tmp_delta_absent2 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }
+      }
+    }
+    
+    #define some variables that we will use to calculate the choice probs below
+    sigma<-1 #diffusion coefficient. fixed at 1
+    
+    pred_choice_prop<-foreach(l=1:length(tmp_alpha),.combine='rbind',.packages = c("RWiener","dplyr")) %dopar% {
+      
+      #calculate choice probabilities (needed to dead with defective CDF)
+      ## calc absolute start point
+      z<-tmp_alpha[l]*tmp_beta1[l] 
+      
+      ## calculate choice probabilities for current trial, parameters (whether it's upper or lower depends on observed choice of current trial)
+      if(tmp_choice==1){#if upper bound response, calculate prob of upper bound resp
+        pred_choice_prop <- (exp(2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2) - exp(2*tmp_delta_cond[l]*(tmp_alpha[l]-z)/sigma^2))/(exp(2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2)-1)
+      }else{#if lower bound response, calculate prob of lower bound resp
+        pred_choice_prop <- (exp(-2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2) - exp(-2*tmp_delta_cond[l]*z/sigma^2))/(exp(-2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2)-1)
+      }
+      return(pred_choice_prop)
+    }
+    
+    estim_choice_props[k,]<-pred_choice_prop
+    print(k)
+    
+    #save quantile estimates every 1000 observations (in case things crash)
+    if(as.numeric(endsWith(as.character(unlist(k)), "000"))==1){
+      # save current estimated quantile data to .RData file
+      fitdir<-"Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m9/ppc/"
+      fitname<-paste(fitdir,"choice_prop_estimates_hdi",".RData",sep = "") 
+      save(estim_choice_props, file = fitname)
+      print("saving data processed to this point")
+      invisible(gc())
+    }
+  }
+  
+  # save full estimated quantile data to .RData file
+  fitdir<-"Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m9/ppc/"
+  fitname<-paste(fitdir,"choice_prop_estimates_hdi",".RData",sep = "") 
+  save(estim_choice_props, file = fitname)
+
+  parallel::stopCluster(cl = cluster)
+  
+}
+
+# before calculating predicted choice proportions -- bc of how we calculated predicted proportions (prob of upper or lower bound resp) -- 
+# we need to go back through the predicted proportions and flip them based on the current trial choice, so 
+# it is simply predicting the probability of an upper bound response only.
+
+n_obs<-dim(real_data)[1]
+
+for (i in 1:n_obs){# for i in n_observations
+  tmp_gazecond<-real_data$cond[i] #get current gaze condition
+  tmp_choice<-real_data$choice[i] #get current choice
+  if(tmp_choice==2){ #if current choice is lower bound response, we need to flip the predicted choice prob
+    estim_choice_props[i,] <- 1-(estim_choice_props[i,])
+  }
+}
+
+subsample<-1000
+
+#version 1: this way plots ALL condtions separate (gaze, emo, head)
+for (j in 1:length(gaze_conds)){
+  for (k in 1:length(emohead_conds)){
+    for (m in 1:length(groups)){
+      
+      #get list of subjects in this group
+      current_subj_list<-unique(subset(real_data,real_data$group==groups[m])$subjID)
+      
+      #create empty array: #subjs in this group x #iterations
+      estim_pred_props_over_subjs <- array(numeric(),c(length(current_subj_list),subsample)) 
+      estim_real_props_over_subjs <- array(numeric(),c(length(current_subj_list),1)) 
+      
+      for (n in 1:length(current_subj_list)){
+        
+        #calculate real YES choice proportion
+        tmp_realdata<-subset(real_data,real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_emo_head==k) # grab real # of yes reponses
+        total_choices<-dim(tmp_realdata)[1] #total choices made for this gaze condition, head condition, for this subj
+        total_yes_choice<-length(which(tmp_realdata$choice==1))
+        estim_real_props_over_subjs[n,1]<-total_yes_choice/total_choices
+        
+        #calculate predicted YES choice proportion + HDIs for this condition/subj
+        
+        ## first, need to flip choice proportions to be upper bound only (we calculated prob of upper or lower bound depending on the choice in a given trial)
+        tmp_prop_cols<-which(real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$choice==1) #YES coded as 1 in data
+        tmp_prop_est<-estim_choice_props[tmp_prop_cols,]
+        
+        #average estimates over trials for this subject (gives matrix = #subsamples*#quantiles)
+        if(length(tmp_prop_cols)==0){ #if no trials for current condition for current subject, create array of NA
+          estim_pred_props_over_subjs[n,]<-as.numeric(matrix(NA,nrow=1,ncol=subsample))
+        }else if(length(tmp_prop_cols)==1){
+          estim_pred_props_over_subjs[n,]<-tmp_prop_est
+        }else{ # if subj has 2 or more trials for this cond, average over trials
+          estim_pred_props_over_subjs[n,]<-apply(tmp_prop_est, c(2), mean,na.rm=TRUE) 
+        }
+      }
+      
+      #calculate predicted YES choice proportion + HDIs
+      tmp_hdi_pred<-HDIofMCMC(as.vector(estim_pred_props_over_subjs))
+      tmp_hdi_real<-HDIofMCMC(as.vector(estim_real_props_over_subjs))
+      
+      tmp_cond<-paste("group ",m," | gaze",j," | emohead",k,sep="")
+      
+      #setup data in long form (for plots)
+      choiceprop_data<-data.frame(
+        type=as.factor(c("real","pred")), # type of data (long form)
+        mean_choiceprop=as.numeric(c(mean(estim_real_props_over_subjs),mean(estim_pred_props_over_subjs,na.rm = TRUE))),
+        pred_hdi_lo=as.numeric(c(tmp_hdi_real[1],tmp_hdi_pred[1])),
+        pred_hdi_hi=as.numeric(c(tmp_hdi_real[2],tmp_hdi_pred[2])))
+      
+      choiceprop_data$group<-as.factor(m)
+      choiceprop_data$cond<-tmp_cond
+      
+      if(j==1&k==1&m==1){ #if first iteration
+        grp_choiceprop_data<-choiceprop_data   
+      }else{
+        grp_choiceprop_data<-rbind(grp_choiceprop_data,choiceprop_data)
+      }
+    }
+  }
+}
+
+grp_choiceprop_data <- grp_choiceprop_data[order(grp_choiceprop_data$cond),]
+
+library(ggbeeswarm)
+library(ggdist)
+library(ggforce)
+library(gghalves)
+detach(package:plyr)
+
+real_data$plot_cond<-paste("group ",real_data$group," | gaze",real_data$cond," | emohead",real_data$cond_other_emo_head,sep="")
+plot_real_data <- real_data[order(real_data$plot_cond),]
+plot_real_data$choice[plot_real_data$choice == 2] <- 0
+
+plot_real_data <- plot_real_data %>% 
+  dplyr::group_by(plot_cond,subjID) %>% 
+  summarize(choice = mean(choice))
+
+plot_real_data$type<-"real"
+
+title<-paste("Model 9 choice pred (% yes):\n All cond",sep="")
+plot<-ggplot(data=grp_choiceprop_data, aes(x=cond, y=mean_choiceprop,color=type)) +
+  geom_point(data=grp_choiceprop_data,alpha=1,aes(shape=group),position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=grp_choiceprop_data,aes(ymin=pred_hdi_lo,ymax=pred_hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  scale_fill_manual(values=c('#F8766D','#00BFC4'))+
+  coord_cartesian(ylim = c(0,1))+
+  ggtitle(title) + xlab("") +
+  ylab("Choice Proportions")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+
+  gghalves::geom_half_point(data=plot_real_data,aes(x=factor(plot_cond),y=choice,color=type),
+    size=1.5,
+    side = "r", ## draw jitter on the right
+    range_scale = .8, ## control range of jitter
+    alpha = .2## add some transparency
+  ) +
+  coord_flip()
+print(plot)
+
+#version2: this way plots head and gaze condityions but marginalizes over emo cond
+for (j in 1:length(gaze_conds)){
+  for (k in 1:length(head_conds)){
+    for (m in 1:length(groups)){
+      
+      #get list of subjects in this group
+      current_subj_list<-unique(subset(real_data,real_data$group==groups[m])$subjID)
+      
+      #create empty array: #subjs in this group x #iterations
+      estim_pred_props_over_subjs <- array(numeric(),c(length(current_subj_list),subsample)) 
+      estim_real_props_over_subjs <- array(numeric(),c(length(current_subj_list),1)) 
+      
+      for (n in 1:length(current_subj_list)){
+        
+        #calculate real YES choice proportion
+        tmp_realdata<-subset(real_data,real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_head==k) # grab real # of yes reponses
+        total_choices<-dim(tmp_realdata)[1] #total choices made for this gaze condition, head condition, for this subj
+        total_yes_choice<-length(which(tmp_realdata$choice==1))
+        estim_real_props_over_subjs[n,1]<-total_yes_choice/total_choices
+        
+        #calculate predicted YES choice proportion + HDIs for this condition/subj
+        
+        ## first, need to flip choice proportions to be upper bound only (we calculated prob of upper or lower bound depending on the choice in a given trial)
+        tmp_prop_cols<-which(real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_head==k & real_data$choice==1) #YES coded as 1 in data
+        tmp_prop_est<-estim_choice_props[tmp_prop_cols,]
+        
+        #average estimates over trials for this subject (gives matrix = #subsamples*#quantiles)
+        if(length(tmp_prop_cols)==0){ #if no trials for current condition for current subject, create array of NA
+          estim_pred_props_over_subjs[n,]<-as.numeric(matrix(NA,nrow=1,ncol=subsample))
+        }else if(length(tmp_prop_cols)==1){
+          estim_pred_props_over_subjs[n,]<-tmp_prop_est
+        }else{ # if subj has 2 or more trials for this cond, average over trials
+          estim_pred_props_over_subjs[n,]<-apply(tmp_prop_est, c(2), mean,na.rm=TRUE) 
+        }
+      }
+      
+      #calculate predicted YES choice proportion + HDIs
+      tmp_hdi_pred<-HDIofMCMC(as.vector(estim_pred_props_over_subjs))
+      tmp_hdi_real<-HDIofMCMC(as.vector(estim_real_props_over_subjs))
+      
+      tmp_cond<-paste("group ",m," | gaze",j," | head",k,sep="")
+      
+      #setup data in long form (for plots)
+        choiceprop_data<-data.frame(
+        type=as.factor(c("real","pred")), # type of data (long form)
+        mean_choiceprop=as.numeric(c(mean(estim_real_props_over_subjs),mean(estim_pred_props_over_subjs,na.rm = TRUE))),
+        pred_hdi_lo=as.numeric(c(tmp_hdi_real[1],tmp_hdi_pred[1])),
+        pred_hdi_hi=as.numeric(c(tmp_hdi_real[2],tmp_hdi_pred[2])))
+      
+      choiceprop_data$group<-as.factor(m)
+      choiceprop_data$cond<-tmp_cond
+      
+      if(j==1&k==1&m==1){ #if first iteration
+        grp_choiceprop_data<-choiceprop_data   
+      }else{
+        grp_choiceprop_data<-rbind(grp_choiceprop_data,choiceprop_data)
+      }
+    }
+  }
+}
+
+grp_choiceprop_data <- grp_choiceprop_data[order(grp_choiceprop_data$cond),]
+
+real_data$plot_cond<-paste("group ",real_data$group," | gaze",real_data$cond," | head",real_data$cond_other_head,sep="")
+plot_real_data <- real_data[order(real_data$plot_cond),]
+plot_real_data$choice[plot_real_data$choice == 2] <- 0
+
+plot_real_data <- plot_real_data %>% 
+  dplyr::group_by(plot_cond,subjID) %>% 
+  summarize(choice = mean(choice))
+
+plot_real_data$type<-"real"
+
+title<-paste("Model 9 choice pred (% yes):\n Marginalize Emo",sep="")
+plot<-ggplot(data=grp_choiceprop_data, aes(x=cond, y=mean_choiceprop,color=type)) +
+  geom_point(data=grp_choiceprop_data,alpha=1,aes(shape=group),position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=grp_choiceprop_data,aes(ymin=pred_hdi_lo,ymax=pred_hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  scale_fill_manual(values=c('#F8766D','#00BFC4'))+
+  coord_cartesian(ylim = c(0,1))+
+  ggtitle(title) + xlab("") +
+  ylab("Choice Proportions")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+
+  gghalves::geom_half_point(data=plot_real_data,aes(x=factor(plot_cond),y=choice,color=type),
+    size=1.5,
+    side = "r", ## draw jitter on the right
+    range_scale = .8, ## control range of jitter
+    alpha = .2## add some transparency
+  ) +
+  coord_flip()
+print(plot)
+
+rm(estim_pred_props_over_subjs)
+invisible(gc())
+  
+```
+
+### Predicted Choice Proportions (Model 10) 
+
+Predictions look good except for the larger variability of gazecond1 (direct) + headcond2 (indirect) for all 3 groups. But this large variability actually maps onto the observed SD of accuracy in these conditions.
+
+```{r id26, echo=FALSE, fig.height=9, fig.width=4.5, message=FALSE, warning=FALSE,fig.show="hold"}
+
+estimated_choiceprops_file<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/ppc/choice_prop_estimates_hdi.RData"
+
+#load real observed data
+real_data<-read.csv('/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/data/gaze_beh.csv',header=TRUE) #load real observed data
+real_data$subjID<-match(real_data$subj, unique(real_data$subj)) #subj IDs to sequential indexes 
+
+quantiles<-c(.1,.3,.5,.7,.9)
+groups<-unique(real_data$group)
+subjs<-unique(real_data$subjID)
+gaze_conds<-unique(real_data$cond)
+emo_conds<-unique(real_data$cond_other_emo)
+head_conds<-unique(real_data$cond_other_head)
+emohead_conds<-unique(real_data$cond_other_emo_head)
+choices<-unique(real_data$choice)
+acc<-unique(real_data$acc)
+n_obs<-dim(real_data)[1]
+cores<-10
+
+if(file.exists(estimated_choiceprops_file)){ #if file exists,load it
+  load(estimated_choiceprops_file)
+}else{ #if file doesn't exist, run code to estimate quantiles
+  
+  load("/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/final_fit/stanfit_cmdstan.RData") #load posterior samples
+  iterations=dim(alldata)[1] #number of posterwarmup draws
+  posterior<-data.frame(alldata)
+  
+  rm(alldata)
+  invisible(gc())
+  
+  #setup cluster on computer for parallel processing
+  cluster <- makeCluster(cores) #Leave one core to avoid overload your computer
+  registerDoParallel(cluster)
+  
+  # get subj level variables (group and minRT) and subj*cond*choice level varaibles (ie how many trials each subject has for each gaze condition, choice)
+  for (i in 1:length(subjs)){
+    tmpdata<-subset(real_data,real_data$subjID==i) 
+    #get min Rt and group for this subj
+    tmp_subj_vars<-data.frame(subj=i,group=unique((tmpdata$group)),minRT=min(tmpdata$rt))
+    if (i==1){
+      subj_vars<-tmp_subj_vars
+    }else{
+      subj_vars<-rbind(subj_vars,tmp_subj_vars)
+    }
+    for (j in 1:length(gaze_conds)){
+      for (k in 1:length(emohead_conds)){
+        for (l in 1:length(choices)){
+          tmpdata<-dim(subset(real_data,real_data$subjID==i & real_data$cond == j & real_data$other_cond_emo_head == k & real_data$choice == l))[1]
+          tmp_cond_vars<-data.frame(subj=i,gaze_cond=j,emohead_cond=k,choice=l,trials=tmpdata)
+          if (i==1 & j==1 & k==1 & l==1){
+            cond_vars<-tmp_cond_vars
+          }else{
+            cond_vars<-rbind(cond_vars,tmp_cond_vars)
+          }
+        }
+      }
+    }
+  }
+  
+  #get group level vars
+  for (i in 1:length(groups)){
+    tmpdata<-subset(real_data,real_data$group==i)
+    tmp_group_vars<-data.frame(group=i,maxRT=max(tmpdata$rt))
+    if (i==1){
+      group_vars<-tmp_group_vars
+    }else{
+      group_vars<-rbind(group_vars,tmp_group_vars)
+    }
+  }
+  
+  #grab rand draws to subsample from full posterior to make the file size more managable
+  set.seed(42)
+  
+  # prepare the posterior samples
+  ## subject parameters
+  sub_alpha_pr_samples<-posterior[,c(grep("sub_alpha_pr", colnames(posterior)))]
+  sub_beta_pr_samples<-posterior[,c(grep("sub_beta_pr", colnames(posterior)))] 
+  sub_delta_present1_pr_samples<-posterior[,c(grep("sub_delta_present_pr", colnames(posterior)))][,1:100]
+  sub_delta_present2_pr_samples<-posterior[,c(grep("sub_delta_present_pr", colnames(posterior)))][,101:200] 
+  sub_delta_present3_pr_samples<-posterior[,c(grep("sub_delta_present_pr", colnames(posterior)))][,201:300]
+  sub_delta_present4_pr_samples<-posterior[,c(grep("sub_delta_present_pr", colnames(posterior)))][,301:400] 
+  sub_delta_absent1_pr_samples<-posterior[,c(grep("sub_delta_absent_pr", colnames(posterior)))][,1:100]
+  sub_delta_absent2_pr_samples<-posterior[,c(grep("sub_delta_absent_pr", colnames(posterior)))][,101:200]
+  sub_delta_absent3_pr_samples<-posterior[,c(grep("sub_delta_absent_pr", colnames(posterior)))][,201:300]
+  sub_delta_absent4_pr_samples<-posterior[,c(grep("sub_delta_absent_pr", colnames(posterior)))][,301:400]
+  sub_ndt_pr_samples<-posterior[,c(grep("sub_ndt_pr", colnames(posterior)))] 
+  
+  ## group parameters (means)
+  mu_grp_alpha_pr_samples<-posterior[,c(grep("mu_grp_alpha_pr", colnames(posterior)))] 
+  mu_grp_beta_pr_samples<-posterior[,c(grep("mu_grp_beta_pr", colnames(posterior)))] 
+  mu_grp_delta_present_pr_samples<-posterior[,c(grep("mu_grp_delta_present_pr", colnames(posterior)))] 
+  mu_grp_delta_absent_pr_samples<-posterior[,c(grep("mu_grp_delta_absent_pr", colnames(posterior)))] 
+  mu_grp_ndt_pr_samples<-posterior[,c(grep("mu_grp_ndt_pr", colnames(posterior)))] 
+  
+  ## group parameters (variances)
+  sig_grp_alpha_pr_samples<-posterior[,c(grep("sig_grp_alpha_pr", colnames(posterior)))] 
+  sig_grp_beta_pr_samples<-posterior[,c(grep("sig_grp_beta_pr", colnames(posterior)))] 
+  sig_grp_delta_pr_samples<-posterior[,c(grep("sig_grp_delta_pr", colnames(posterior)))] 
+  sig_grp_ndt_pr_samples<-posterior[,c(grep("sig_grp_ndt_pr", colnames(posterior)))] 
+  
+  ## other condition parameters (group level effect; 2x emo conditions)
+  cond_delta1_pr_samples<-(posterior[,c(grep("cond_delta_pr", colnames(posterior)))])[,1:3]
+  cond_delta2_pr_samples<-(posterior[,c(grep("cond_delta_pr", colnames(posterior)))])[,4:6]
+  cond_delta3_pr_samples<-(posterior[,c(grep("cond_delta_pr", colnames(posterior)))])[,7:9]
+  cond_delta4_pr_samples<-(posterior[,c(grep("cond_delta_pr", colnames(posterior)))])[,10:12]
+  
+  subsample<-1000 #how many draws should we randomly subsample from the full posterior 
+  
+  #create empty array for predicted choice proportions: #obs x #subsampled iterations
+  estim_choice_props <- array(numeric(),c(n_obs,subsample)) 
+  
+  for (k in 1:n_obs){
+    tmp_subj<-real_data$subjID[k]
+    tmp_group<-real_data$group[k]
+    tmp_gazecond<-real_data$cond[k]
+    tmp_emoheadcond<-real_data$cond_other_emo_head[k]
+    tmp_choice<-real_data$choice[k]
+    tmp_minRT<-subj_vars$minRT[tmp_subj] #get this subj's min RT
+    
+    #rand subsample
+    rand_draws<-sample(seq(from=1,to=iterations,by=1),subsample)
+    
+    #randomly draw group mean, variance values 
+    tmp_mu_grp_alpha_pr<-as.numeric(unlist(mu_grp_alpha_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_beta_pr<-as.numeric(unlist(mu_grp_beta_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_delta_present_pr<-as.numeric(unlist(mu_grp_delta_present_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_delta_absent_pr<-as.numeric(unlist(mu_grp_delta_absent_pr_samples[rand_draws,tmp_group]))
+    tmp_mu_grp_ndt_pr<-as.numeric(unlist(mu_grp_ndt_pr_samples[rand_draws,tmp_group]))
+    
+    tmp_sig_grp_alpha_pr<-as.numeric(unlist(sig_grp_alpha_pr_samples[rand_draws,tmp_group]))
+    tmp_sig_grp_beta_pr<-as.numeric(unlist(sig_grp_beta_pr_samples[rand_draws,tmp_group]))
+    tmp_sig_grp_delta_pr<-as.numeric(unlist(sig_grp_delta_pr_samples[rand_draws,tmp_group]))
+    tmp_sig_grp_ndt_pr<-as.numeric(unlist(sig_grp_ndt_pr_samples[rand_draws,tmp_group]))
+    
+    # randomly draw condition level values
+    tmp_cond_delta1_pr<-as.numeric(unlist(cond_delta1_pr_samples[rand_draws,tmp_group]))
+    tmp_cond_delta2_pr<-as.numeric(unlist(cond_delta2_pr_samples[rand_draws,tmp_group]))
+    tmp_cond_delta3_pr<-as.numeric(unlist(cond_delta3_pr_samples[rand_draws,tmp_group]))
+    tmp_cond_delta4_pr<-as.numeric(unlist(cond_delta4_pr_samples[rand_draws,tmp_group]))
+    
+    #draw subj level values
+    tmp_sub_alpha_pr<-as.numeric(unlist(sub_alpha_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_beta_pr<-as.numeric(unlist(sub_beta_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_present1_pr<-as.numeric(unlist(sub_delta_present1_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_present2_pr<-as.numeric(unlist(sub_delta_present2_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_present3_pr<-as.numeric(unlist(sub_delta_present3_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_present4_pr<-as.numeric(unlist(sub_delta_present4_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_absent1_pr<-as.numeric(unlist(sub_delta_absent1_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_absent2_pr<-as.numeric(unlist(sub_delta_absent2_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_absent3_pr<-as.numeric(unlist(sub_delta_absent3_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_delta_absent4_pr<-as.numeric(unlist(sub_delta_absent4_pr_samples[rand_draws,tmp_subj]))
+    tmp_sub_ndt_pr<-as.numeric(unlist(sub_ndt_pr_samples[rand_draws,tmp_subj]))
+    
+    # do transformations for non centered parameterization (scale raw subject par by group mean and variance)
+    tmp_alpha<-pnorm(tmp_mu_grp_alpha_pr + tmp_sub_alpha_pr*tmp_sig_grp_alpha_pr)*3.9+0.1
+    tmp_beta<-pnorm(tmp_mu_grp_beta_pr + tmp_sub_beta_pr*tmp_sig_grp_beta_pr)
+    tmp_delta_present1<-pnorm(tmp_mu_grp_delta_present_pr + tmp_sub_delta_present1_pr*tmp_sig_grp_delta_pr+tmp_cond_delta1_pr)*8-4
+    tmp_delta_present2<-pnorm(tmp_mu_grp_delta_present_pr + tmp_sub_delta_present2_pr*tmp_sig_grp_delta_pr+tmp_cond_delta2_pr)*8-4
+    tmp_delta_present3<-pnorm(tmp_mu_grp_delta_present_pr + tmp_sub_delta_present3_pr*tmp_sig_grp_delta_pr+tmp_cond_delta3_pr)*8-4
+    tmp_delta_present4<-pnorm(tmp_mu_grp_delta_present_pr + tmp_sub_delta_present4_pr*tmp_sig_grp_delta_pr+tmp_cond_delta4_pr)*8-4
+    tmp_delta_absent1<-pnorm(tmp_mu_grp_delta_absent_pr + tmp_sub_delta_absent1_pr*tmp_sig_grp_delta_pr+tmp_cond_delta1_pr)*8-4
+    tmp_delta_absent2<-pnorm(tmp_mu_grp_delta_absent_pr + tmp_sub_delta_absent2_pr*tmp_sig_grp_delta_pr+tmp_cond_delta2_pr)*8-4
+    tmp_delta_absent3<-pnorm(tmp_mu_grp_delta_absent_pr + tmp_sub_delta_absent3_pr*tmp_sig_grp_delta_pr+tmp_cond_delta3_pr)*8-4
+    tmp_delta_absent4<-pnorm(tmp_mu_grp_delta_absent_pr + tmp_sub_delta_absent4_pr*tmp_sig_grp_delta_pr+tmp_cond_delta4_pr)*8-4
+    tmp_ndt<-(pnorm(tmp_mu_grp_ndt_pr + tmp_sub_ndt_pr*tmp_sig_grp_ndt_pr)*tmp_minRT*0.9)/1000
+    
+    if(tmp_gazecond==1){#if gaze=direct
+      if(tmp_choice==1){#if choice =YES (correct)
+        resp<-"upper" #will use this variable for RWiener cdf function (pwiener) below)
+        tmp_beta1<-tmp_beta
+        if(tmp_emoheadcond==1){
+          tmp_delta_cond<-tmp_delta_present1
+        }else if(tmp_emoheadcond==2){
+          tmp_delta_cond<-tmp_delta_present2
+        }else if(tmp_emoheadcond==3){
+          tmp_delta_cond<-tmp_delta_present3
+        }else if(tmp_emoheadcond==4){
+          tmp_delta_cond<-tmp_delta_present4
+        }
+      }else{#if choice=NO (incorrect)
+        resp<-"lower"
+        tmp_beta1<-tmp_beta #im deliberately NOT flipping the beta here (1-beta) like i would usually bc qwiener func does this internally based on the resp specified
+        if(tmp_emoheadcond==1){
+          tmp_delta_cond<-tmp_delta_present1 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else if(tmp_emoheadcond==2){
+          tmp_delta_cond<-tmp_delta_present2 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else if(tmp_emoheadcond==3){
+          tmp_delta_cond<-tmp_delta_present3 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else if(tmp_emoheadcond==4){
+          tmp_delta_cond<-tmp_delta_present4 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }
+      }
+    }else{ #if gaze=indirect
+      if(tmp_choice==1){#if choice=YES (incorrect)
+        resp<-"upper"
+        tmp_beta1<-tmp_beta
+        if(tmp_emoheadcond==1){
+          tmp_delta_cond<-tmp_delta_absent1 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else if(tmp_emoheadcond==2){
+          tmp_delta_cond<-tmp_delta_absent2 
+        }else if(tmp_emoheadcond==3){
+          tmp_delta_cond<-tmp_delta_absent3
+        }else if(tmp_emoheadcond==4){
+          tmp_delta_cond<-tmp_delta_absent4
+        }
+      }else{#if choice=NO (correct)
+        resp<-"lower"
+        tmp_beta1<-tmp_beta #im deliberately NOT flipping the beta here (1-beta) like i would usually bc qwiener func does this internally based on the resp specified
+        if(tmp_emoheadcond==1){
+          tmp_delta_cond<-tmp_delta_absent1 #im deliberately NOT inverting the delta here (-1*delta) like i would usually bc qwiener func does this internally based on the resp specified
+        }else if(tmp_emoheadcond==2){
+          tmp_delta_cond<-tmp_delta_absent2 
+        }else if(tmp_emoheadcond==3){
+          tmp_delta_cond<-tmp_delta_absent3
+        }else if(tmp_emoheadcond==4){
+          tmp_delta_cond<-tmp_delta_absent4
+        }
+      }
+    }
+    
+    #define some variables that we will use to calculate the choice probs below
+    sigma<-1 #diffusion coefficient. fixed at 1
+    
+    pred_choice_prop<-foreach(l=1:length(tmp_alpha),.combine='rbind',.packages = c("RWiener","dplyr")) %dopar% {
+      
+      #calculate choice probabilities (needed to dead with defective CDF)
+      ## calc absolute start point
+      z<-tmp_alpha[l]*tmp_beta1[l] 
+      
+      ## calculate choice probabilities for current trial, parameters (whether it's upper or lower depends on observed choice of current trial)
+      if(tmp_choice==1){#if upper bound response, calculate prob of upper bound resp
+        pred_choice_prop <- (exp(2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2) - exp(2*tmp_delta_cond[l]*(tmp_alpha[l]-z)/sigma^2))/(exp(2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2)-1)
+      }else{#if lower bound response, calculate prob of lower bound resp
+        pred_choice_prop <- (exp(-2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2) - exp(-2*tmp_delta_cond[l]*z/sigma^2))/(exp(-2*tmp_delta_cond[l]*tmp_alpha[l]/sigma^2)-1)
+      }
+      return(pred_choice_prop)
+    }
+    
+    estim_choice_props[k,]<-pred_choice_prop
+    print(k)
+    
+    #save quantile estimates every 1000 observations (in case things crash)
+    if(as.numeric(endsWith(as.character(unlist(k)), "000"))==1){
+      # save current estimated quantile data to .RData file
+      fitdir<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m9/ppc/"
+      fitname<-paste(fitdir,"choice_prop_estimates_hdi",".RData",sep = "") 
+      save(estim_choice_props, file = fitname)
+      print("saving data processed to this point")
+      invisible(gc())
+    }
+  }
+  
+  # save full estimated quantile data to .RData file
+  fitdir<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m9/ppc/"
+  fitname<-paste(fitdir,"choice_prop_estimates_hdi",".RData",sep = "") 
+  save(estim_choice_props, file = fitname)
+  
+  parallel::stopCluster(cl = cluster)
+  
+}
+
+# before calculating predicted choice proportions -- bc of how we calculated predicted proportions (prob of upper or lower bound resp) -- 
+# we need to go back through the predicted proportions and flip them based on the current trial choice, so 
+# it is simply predicting the probability of an upper bound response only.
+
+n_obs<-dim(real_data)[1]
+
+for (i in 1:n_obs){# for i in n_observations
+  tmp_gazecond<-real_data$cond[i] #get current gaze condition
+  tmp_choice<-real_data$choice[i] #get current choice
+  if(tmp_choice==2){ #if current choice is lower bound response, we need to flip the predicted choice prob
+    estim_choice_props[i,] <- 1-(estim_choice_props[i,])
+  }
+}
+
+subsample<-1000
+
+#version 1: this way plots ALL condtions separate (gaze, emo, head)
+for (j in 1:length(gaze_conds)){
+  for (k in 1:length(emohead_conds)){
+    for (m in 1:length(groups)){
+      
+      #get list of subjects in this group
+      current_subj_list<-unique(subset(real_data,real_data$group==groups[m])$subjID)
+      
+      #create empty array: #subjs in this group x #iterations
+      estim_pred_props_over_subjs <- array(numeric(),c(length(current_subj_list),subsample)) 
+      estim_real_props_over_subjs <- array(numeric(),c(length(current_subj_list),1)) 
+      
+      for (n in 1:length(current_subj_list)){
+        
+        #calculate real YES choice proportion
+        tmp_realdata<-subset(real_data,real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_emo_head==k) # grab real # of yes reponses
+        total_choices<-dim(tmp_realdata)[1] #total choices made for this gaze condition, head condition, for this subj
+        total_yes_choice<-length(which(tmp_realdata$choice==1))
+        estim_real_props_over_subjs[n,1]<-total_yes_choice/total_choices
+        
+        #calculate predicted YES choice proportion + HDIs for this condition/subj
+        
+        ## first, need to flip choice proportions to be upper bound only (we calculated prob of upper or lower bound depending on the choice in a given trial)
+        tmp_prop_cols<-which(real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_emo_head==k & real_data$choice==1) #YES coded as 1 in data
+        tmp_prop_est<-estim_choice_props[tmp_prop_cols,]
+        
+        #average estimates over trials for this subject (gives matrix = #subsamples*#quantiles)
+        if(length(tmp_prop_cols)==0){ #if no trials for current condition for current subject, create array of NA
+          estim_pred_props_over_subjs[n,]<-as.numeric(matrix(NA,nrow=1,ncol=subsample))
+        }else if(length(tmp_prop_cols)==1){
+          estim_pred_props_over_subjs[n,]<-tmp_prop_est
+        }else{ # if subj has 2 or more trials for this cond, average over trials
+          estim_pred_props_over_subjs[n,]<-apply(tmp_prop_est, c(2), mean,na.rm=TRUE) 
+        }
+      }
+      
+      #calculate predicted YES choice proportion + HDIs
+      tmp_hdi_pred<-HDIofMCMC(as.vector(estim_pred_props_over_subjs))
+      tmp_hdi_real<-HDIofMCMC(as.vector(estim_real_props_over_subjs))
+      
+      tmp_cond<-paste("group ",m," | gaze",j," | emohead",k,sep="")
+      
+      #setup data in long form (for plots)
+      choiceprop_data<-data.frame(
+        type=as.factor(c("real","pred")), # type of data (long form)
+        mean_choiceprop=as.numeric(c(mean(estim_real_props_over_subjs),mean(estim_pred_props_over_subjs,na.rm = TRUE))),
+        pred_hdi_lo=as.numeric(c(tmp_hdi_real[1],tmp_hdi_pred[1])),
+        pred_hdi_hi=as.numeric(c(tmp_hdi_real[2],tmp_hdi_pred[2])))
+      
+      choiceprop_data$group<-as.factor(m)
+      choiceprop_data$cond<-tmp_cond
+      
+      if(j==1&k==1&m==1){ #if first iteration
+        grp_choiceprop_data<-choiceprop_data   
+      }else{
+        grp_choiceprop_data<-rbind(grp_choiceprop_data,choiceprop_data)
+      }
+    }
+  }
+}
+
+grp_choiceprop_data <- grp_choiceprop_data[order(grp_choiceprop_data$cond),]
+
+real_data$plot_cond<-paste("group ",real_data$group," | gaze",real_data$cond," | emohead",real_data$cond_other_emo_head,sep="")
+plot_real_data <- real_data[order(real_data$plot_cond),]
+plot_real_data$choice[plot_real_data$choice == 2] <- 0
+
+plot_real_data <- plot_real_data %>% 
+  dplyr::group_by(plot_cond,subjID) %>% 
+  summarize(choice = mean(choice))
+
+plot_real_data$type<-"real"
+
+title<-paste("Model 10 choice pred (% yes):\n All cond",sep="")
+plot<-ggplot(data=grp_choiceprop_data, aes(x=cond, y=mean_choiceprop,color=type)) +
+  geom_point(data=grp_choiceprop_data,alpha=1,aes(shape=group),position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=grp_choiceprop_data,aes(ymin=pred_hdi_lo,ymax=pred_hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  scale_fill_manual(values=c('#F8766D','#00BFC4'))+
+  coord_cartesian(ylim = c(0,1))+
+  ggtitle(title) + xlab("") +
+  ylab("Choice Proportions")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+
+  gghalves::geom_half_point(data=plot_real_data,aes(x=factor(plot_cond),y=choice,color=type),
+    size=1.5,
+    side = "r", ## draw jitter on the right
+    range_scale = .8, ## control range of jitter
+    alpha = .2## add some transparency
+  ) +
+  coord_flip()
+print(plot)
+
+#version2: this way plots head and gaze condityions but marginalizes over emo cond
+for (j in 1:length(gaze_conds)){
+  for (k in 1:length(head_conds)){
+    for (m in 1:length(groups)){
+      
+      #get list of subjects in this group
+      current_subj_list<-unique(subset(real_data,real_data$group==groups[m])$subjID)
+      
+      #create empty array: #subjs in this group x #iterations
+      estim_pred_props_over_subjs <- array(numeric(),c(length(current_subj_list),subsample)) 
+      estim_real_props_over_subjs <- array(numeric(),c(length(current_subj_list),1)) 
+      
+      for (n in 1:length(current_subj_list)){
+        
+        #calculate real YES choice proportion
+        tmp_realdata<-subset(real_data,real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_head==k) # grab real # of yes reponses
+        total_choices<-dim(tmp_realdata)[1] #total choices made for this gaze condition, head condition, for this subj
+        total_yes_choice<-length(which(tmp_realdata$choice==1))
+        estim_real_props_over_subjs[n,1]<-total_yes_choice/total_choices
+        
+        #calculate predicted YES choice proportion + HDIs for this condition/subj
+        
+        ## first, need to flip choice proportions to be upper bound only (we calculated prob of upper or lower bound depending on the choice in a given trial)
+        tmp_prop_cols<-which(real_data$subjID==current_subj_list[n] & real_data$cond==j & real_data$cond_other_head==k & real_data$choice==1) #YES coded as 1 in data
+        tmp_prop_est<-estim_choice_props[tmp_prop_cols,]
+        
+        #average estimates over trials for this subject (gives matrix = #subsamples*#quantiles)
+        if(length(tmp_prop_cols)==0){ #if no trials for current condition for current subject, create array of NA
+          estim_pred_props_over_subjs[n,]<-as.numeric(matrix(NA,nrow=1,ncol=subsample))
+        }else if(length(tmp_prop_cols)==1){
+          estim_pred_props_over_subjs[n,]<-tmp_prop_est
+        }else{ # if subj has 2 or more trials for this cond, average over trials
+          estim_pred_props_over_subjs[n,]<-apply(tmp_prop_est, c(2), mean,na.rm=TRUE) 
+        }
+      }
+      
+      #calculate predicted YES choice proportion + HDIs
+      tmp_hdi_pred<-HDIofMCMC(as.vector(estim_pred_props_over_subjs))
+      tmp_hdi_real<-HDIofMCMC(as.vector(estim_real_props_over_subjs))
+      
+      tmp_cond<-paste("group ",m," | gaze",j," | head",k,sep="")
+      
+      #setup data in long form (for plots)
+        choiceprop_data<-data.frame(
+        type=as.factor(c("real","pred")), # type of data (long form)
+        mean_choiceprop=as.numeric(c(mean(estim_real_props_over_subjs),mean(estim_pred_props_over_subjs,na.rm = TRUE))),
+        pred_hdi_lo=as.numeric(c(tmp_hdi_real[1],tmp_hdi_pred[1])),
+        pred_hdi_hi=as.numeric(c(tmp_hdi_real[2],tmp_hdi_pred[2])))
+      
+      choiceprop_data$group<-as.factor(m)
+      choiceprop_data$cond<-tmp_cond
+      
+      if(j==1&k==1&m==1){ #if first iteration
+        grp_choiceprop_data<-choiceprop_data   
+      }else{
+        grp_choiceprop_data<-rbind(grp_choiceprop_data,choiceprop_data)
+      }
+    }
+  }
+}
+
+grp_choiceprop_data <- grp_choiceprop_data[order(grp_choiceprop_data$cond),]
+
+real_data$plot_cond<-paste("group ",real_data$group," | gaze",real_data$cond," | head",real_data$cond_other_head,sep="")
+plot_real_data <- real_data[order(real_data$plot_cond),]
+plot_real_data$choice[plot_real_data$choice == 2] <- 0
+
+plot_real_data <- plot_real_data %>% 
+  dplyr::group_by(plot_cond,subjID) %>% 
+  summarize(choice = mean(choice))
+
+plot_real_data$type<-"real"
+
+title<-paste("Model 10 choice pred (% yes):\n Marginalize Emo",sep="")
+plot<-ggplot(data=grp_choiceprop_data, aes(x=cond, y=mean_choiceprop,color=type)) +
+  geom_point(data=grp_choiceprop_data,alpha=1,aes(shape=group),position=position_dodge(width = .5),size=3) + theme_bw()+
+  geom_errorbar(data=grp_choiceprop_data,aes(ymin=pred_hdi_lo,ymax=pred_hdi_hi),linewidth=.8,
+                width=0,alpha=1,position=position_dodge(width = .5)) +
+  scale_fill_manual(values=c('#F8766D','#00BFC4'))+
+  coord_cartesian(ylim = c(0,1))+
+  ggtitle(title) + xlab("") +
+  ylab("Choice Proportions")+
+  theme(axis.text.x = element_text(angle = 90,vjust=1,hjust=1))+
+  gghalves::geom_half_point(data=plot_real_data,aes(x=factor(plot_cond),y=choice,color=type),
+    size=1.5,
+    side = "r", ## draw jitter on the right
+    range_scale = .8, ## control range of jitter
+    alpha = .2## add some transparency
+  ) +
+  coord_flip()
+print(plot)
+
+rm(estim_pred_props_over_subjs)
+invisible(gc())
+
+```
+ 
+# Final Fit of Winning Model (Model 10 only)
+
+Final winning model (Model 10) was ran with a larger number of samples on HPC in cmdstanr: 36 chains over 36 cores, with 2500 warmup, 6000 postwarmup draws = 216000 postwarmup samples.
+ 
+```{r id27, echo=FALSE,eval=TRUE,include=TRUE}
+
+### Prep Data: loop through cmdstanr .csv files and combine into single data frame (postwarmup draws x # pars) where #postwarmup draws = rows of all draws from chain 1 (6000 rows), then all draws from chian 2 and so-on) 
+
+warmup<-2500
+postwarmup_draws<-6000
+n_chains<-36
+models<-c('m10')
+outpath<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/"
+
+final_fit_file<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/final_fit/stanfit_cmdstan.RData"
+if(file.exists(final_fit_file)){
+  load(final_fit_file)
+  alldata<-data.frame(alldata)
+}else{
+  for (i in 1:length(models)){
+    model<-paste("hddm_",models[i],sep="")
+    the_fitfile<-paste(outpath,model,'/final_fit/stanfit_cmdstan.RData',sep="")
+    if(file.exists(the_fitfile)){ #if extracted stanfit file exists, do nothing
+    }else{
+      fitdir<-paste(outpath,model,'/final_fit/',sep="")
+      setwd(fitdir)
+  
+      #read in all .csv files
+      files <- (Sys.glob("*.csv"))
+      skip_rows<-50 
+      
+      for (j in 1:length(files)){
+        print(j)
+        tmpfile<-paste(fitdir,files[j],sep="")
+        
+        #only grab the actual samples (not extra comments cmdstan outputs after)
+        tmpdata<-fread(tmpfile,skip=skip_rows,nrows=postwarmup_draws)
+        
+        if (j==1){
+            alldata<-tmpdata
+        }else{
+          alldata<-rbind(alldata,tmpdata)
+        }
+      }
+      
+      myheaders<-read.csv(tmpfile,skip=45,nrows=1)
+      my_colnames <- colnames(myheaders) 
+      colnames(alldata)<-my_colnames
+      
+      #save combined cmdstan fit object to .RData file
+      fitname<-paste(fitdir,"stanfit_cmdstan",".RData",sep = "") 
+      save(alldata, file = fitname)
+      alldata<-data.frame(alldata)
+    }
+  }
+}
+
+```
+ 
+## Verify ESS is >10,000 for all parameters
+
+```{r id28, echo=FALSE, eval=TRUE,include=TRUE,fig.height=1.5, fig.width=2.5, message=FALSE, warning=FALSE, tidy=TRUE}
+
+# check for divergent transitions
+divmsg<-paste('There were ',sum(alldata$divergent__),' divergent transitions after warmup',sep='')
+print(divmsg)
+
+# narrow down parameters to examine
+
+#grab sigma data 
+tmp_col<-grep("sig_", colnames(alldata),fixed = TRUE) 
+sigdata<-alldata[,tmp_col] 
+
+#grab mu (group) data and remove untransformed parameters
+tmp_col<-grep("mu_", colnames(alldata),fixed = TRUE) 
+mudata<-alldata[,tmp_col]
+## remove untransformed params
+tmp_col<-grep("_pr.", colnames(mudata),fixed = TRUE) 
+mudata<-mudata[,-tmp_col] 
+
+#grab subdata and remove untransformed parameters
+tmp_col<-grep("sub_", colnames(alldata),fixed = TRUE) 
+subdata<-alldata[,tmp_col]
+## remove untransformed params
+tmp_col<-grep("_pr.", colnames(subdata),fixed = TRUE) 
+subdata<-subdata[,-tmp_col] 
+
+#combine (save over larger "alldata" that had nuisance params)
+alldata<-cbind(mudata,sigdata,subdata)
+params<-colnames(alldata)
+
+# calculate rhat, ESS
+fit_summaryfile<-"/Users/carlylasagna/Dropbox (University of Michigan)/ddm_gaze_bdeeg/modeling/ddm/output/hddm_m10/final_fit/fit_summary.RData"
+if(file.exists(fit_summaryfile)){ #only calculate if fit summary hasn't been processed yet
+  load(fit_summaryfile)
+}else{
+  for (i in 1:length(params)){
+    tmp_data<-alldata[,i]
+    tmp_matrix<-matrix(tmp_data,nrow=postwarmup_draws,ncol=n_chains,byrow=FALSE) #make this back into matrix (#draws * #chains)
+    tmp_summary<-data.frame(
+      parameter=params[i],
+      rhat=round(rhat(tmp_matrix),2),
+      bulk_ess=round(posterior::ess_bulk(tmp_matrix),0),
+      tail_ess=round(posterior::ess_tail(tmp_matrix),0))
+    
+    if(i==1){
+      fit_summary<-tmp_summary
+    }else{
+      fit_summary<-rbind(fit_summary,tmp_summary)
+    }
+  }
+  save(fit_summary,file=fit_summaryfile)
+}
+
+# confirm that ESS of all parameters is >10,000
+fit_summary
+
+rm(list=c("fit_summary"))
+invisible(gc())
+
+```

@@ -156,13 +156,10 @@ transformed parameters {
   
   for (i in 1:N_subj){
    for (j in 1:N_cond_other){
-     sub_alpha[i] = 0.1 + 3.9 * Phi(mu_grp_alpha_pr[subj_group[i]] + sig_grp_alpha_pr[subj_group[i]] * sub_alpha_pr[i]); //from meeting with tim -- he says to do this to add condition: "sub_alpha[subj[i]] = 0.1 + 3.9 * Phi(mu_grp_alpha_pr[group[i]] + sig_grp_alpha_pr[group[i]] * sub_alpha_pr[subj[i]]);"
-     // start point bound between 0 and 1 (< 0.5 lower boundary bias; >0.5 upper boundary bias)
+     sub_alpha[i] = 0.1 + 3.9 * Phi(mu_grp_alpha_pr[subj_group[i]] + sig_grp_alpha_pr[subj_group[i]] * sub_alpha_pr[i]); 
      sub_beta[i,j] = Phi(mu_grp_beta_pr[subj_group[i]] + sig_grp_beta_pr[subj_group[i]] * sub_beta_pr[i,j] + cond_beta_pr[subj_group[i],j]);   
-     //drift rate bound between -4 and 4 (<0 for lower boundary responses, >0 for upper boundary responses)
      sub_delta_present[i,j] = -4 + 8 * Phi(mu_grp_delta_present_pr[subj_group[i]] + sig_grp_delta_pr[subj_group[i]] * sub_delta_present_pr[i,j] + cond_delta_pr[subj_group[i],j]);
      sub_delta_absent[i,j] = -4 + 8 *  Phi(mu_grp_delta_absent_pr[subj_group[i]] + sig_grp_delta_pr[subj_group[i]] * sub_delta_absent_pr[i,j] + cond_delta_pr[subj_group[i],j]);
-     //non-decision time (in seconds) bound between lower RT boundary and subject's fastest RT
      sub_ndt[i] = ((minRT[i]*0.9 - rtBound) * Phi(mu_grp_ndt_pr[subj_group[i]] + sig_grp_ndt_pr[subj_group[i]] * sub_ndt_pr[i]))+rtBound;
      }
    }

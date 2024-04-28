@@ -157,7 +157,7 @@ transformed parameters {
   
   for (i in 1:N_subj){
    for (j in 1:N_cond_other){
-     sub_alpha[i] = 0.1 + 3.9 * Phi(mu_grp_alpha_pr[subj_group[i]] + sig_grp_alpha_pr[subj_group[i]] * sub_alpha_pr[i]); //from meeting with tim -- he says to do this to add condition: "sub_alpha[subj[i]] = 0.1 + 3.9 * Phi(mu_grp_alpha_pr[group[i]] + sig_grp_alpha_pr[group[i]] * sub_alpha_pr[subj[i]]);"
+     sub_alpha[i] = 0.1 + 3.9 * Phi(mu_grp_alpha_pr[subj_group[i]] + sig_grp_alpha_pr[subj_group[i]] * sub_alpha_pr[i]); 
     // start point bound between 0 and 1 (< 0.5 lower boundary bias; >0.5 upper boundary bias)
      sub_beta[i] = Phi(mu_grp_beta_pr[subj_group[i]] + sig_grp_beta_pr[subj_group[i]] * sub_beta_pr[i]);
      //drift rate bound between -4 and 4 (<0 for lower boundary responses, >0 for upper boundary responses)

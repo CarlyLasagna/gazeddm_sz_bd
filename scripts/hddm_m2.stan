@@ -149,14 +149,10 @@ transformed parameters {
   
   // loop through all observations (phi transform (std normal cdf) subj param scaled by group mean/sigma, and re-scale)
   for (i in 1:N_obs) { 
-    // threshold sep. bound between 0.1 and 3.9
     sub_alpha[subj[i]] = 0.1 + 3.9 * Phi(mu_grp_alpha_pr[group[i]] + sig_grp_alpha_pr[group[i]] * sub_alpha_pr[subj[i]]); 
-    // start point bound between 0 and 1 (< 0.5 lower boundary bias; >0.5 upper boundary bias)
     sub_beta[subj[i]] = Phi(mu_grp_beta_pr[group[i]] + sig_grp_beta_pr[group[i]] * sub_beta_pr[subj[i]]);             
-    // drift rate bound between -4 and 4 (<0 for lower boundary responses, >0 for upper boundary responses)
     sub_delta_present[subj[i]] = -4 + 8 * Phi(mu_grp_delta_present_pr[group[i]] + sig_grp_delta_pr[group[i]] * sub_delta_present_pr[subj[i]]);
     sub_delta_absent[subj[i]] = -4 + 8 *  Phi(mu_grp_delta_absent_pr[group[i]] + sig_grp_delta_pr[group[i]] * sub_delta_absent_pr[subj[i]]);
-    // non-decision time (in seconds) bound between lower RT boundary and subject's fastest RT
     sub_ndt[subj[i]] = ((minRT[subj[i]]*0.9 - rtBound) * Phi(mu_grp_ndt_pr[group[i]] + sig_grp_ndt_pr[group[i]] * sub_ndt_pr[subj[i]]))+rtBound;    
   }
 }
